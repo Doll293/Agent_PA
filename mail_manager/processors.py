@@ -70,7 +70,9 @@ def load_classifier():
         return None
 
 
-def classify_mail(subject: str, snippet: str) -> str:
+def classify_mail(subject: str, snippet: str, use_model: bool = True) -> str:
+    if not use_model:
+        return classify_with_rules(subject, snippet)
     classifier = load_classifier()
     if classifier is None:
         return classify_with_rules(subject, snippet)

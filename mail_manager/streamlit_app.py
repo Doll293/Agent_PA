@@ -84,7 +84,7 @@ def _handle_oauth_callback(session_id: str) -> None:
         )
         st.session_state["gmail_credentials"] = gmail_client.serialize_credentials(returned_state)
         logger.info("Gmail OAuth callback completed successfully.")
-    except Exception as exc:  # prototype simple
+    except Exception as exc:
         logger.exception("Gmail OAuth callback failed.")
         st.session_state["last_error"] = str(exc)
     finally:
@@ -176,12 +176,14 @@ def main() -> None:
             st.session_state.pop("gmail_oauth_state", None)
             st.rerun()
 
-    action_col1, action_col2 = st.columns(2)
+    action_col1, action_col2, action_col3 = st.columns([2, 2, 1])
     with action_col1:
         if st.button("Actualiser les mails", use_container_width=True):
             st.rerun()
     with action_col2:
         st.caption(f"{settings.mail_max_results} derniers mails lus au maximum")
+    with action_col3:
+        use_model = st.toggle("Modele IA", value=True, key="use_model")
 
     if error_message:
         logger.error("Stored UI error after login: %s", error_message)
@@ -189,7 +191,7 @@ def main() -> None:
 
     try:
         emails = gmail_client.get_recent_emails(session_id, max_results=settings.mail_max_results)
-    except Exception as exc:  # prototype simple
+    except Exception as exc:  
         logger.exception("Gmail mail retrieval failed.")
         st.error(str(exc))
         return
@@ -201,7 +203,7 @@ def main() -> None:
 
     logger.info("Retrieved %s emails from Gmail API.", len(emails))
 
-    processed_emails = [workflow.run_for_mail(email) for email in emails]
+    processed_emails = [workflow.run_for_mail(email, use_model=use_model) for email in emails]
     available_categories = ["Toutes"] + sorted({email["category"] for email in processed_emails})
 
     st.subheader("Filtres")

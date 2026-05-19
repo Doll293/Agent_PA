@@ -3,12 +3,12 @@ from mail_manager.processors import classify_mail, suggest_action
 
 
 class Workflow:
-    def run_for_mail(self, email_data: dict[str, str]) -> dict[str, str]:
+    def run_for_mail(self, email_data: dict[str, str], use_model: bool = True) -> dict[str, str]:
         anonymized = anonymize_mail(
             email_data.get("subject", ""),
             email_data.get("snippet", ""),
         )
-        category = classify_mail(anonymized["subject"], anonymized["snippet"])
+        category = classify_mail(anonymized["subject"], anonymized["snippet"], use_model=use_model)
         suggestion = suggest_action(category)
 
         return {
