@@ -118,28 +118,39 @@ class GmailClient:
         messages = results.get("messages", [])
         logger.info("Gmail API returned %s message ids", len(messages))
 
-        items: list[dict[str, Any]] = []
-        for message in messages:
-            details = service.users().messages().get(
-                userId="me",
-                id=message["id"],
-                format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
-            ).execute()
+        items: list[dict[str, Any] | None] = [None] * len(messages)
 
-            payload = details.get("payload", {})
+        def _on_message(request_id: str, response: Any, exception: Any) -> None:
+            if exception:
+                logger.error("Failed to fetch message %s: %s", request_id, exception)
+                return
+            idx = int(request_id)
+            payload = response.get("payload", {})
             headers = payload.get("headers", [])
-            items.append(
-                {
-                    "id": details.get("id"),
-                    "from": _get_header(headers, "From", "Inconnu"),
-                    "subject": _get_header(headers, "Subject", "(sans sujet)"),
-                    "date": _get_header(headers, "Date", ""),
-                    "snippet": details.get("snippet", ""),
-                }
+            items[idx] = {
+                "id": response.get("id"),
+                "from": _get_header(headers, "From", "Inconnu"),
+                "subject": _get_header(headers, "Subject", "(sans sujet)"),
+                "date": _get_header(headers, "Date", ""),
+                "snippet": response.get("snippet", ""),
+            }
+
+        batch = service.new_batch_http_request(callback=_on_message)
+        for i, message in enumerate(messages):
+            batch.add(
+                service.users().messages().get(
+                    userId="me",
+                    id=message["id"],
+                    format="metadata",
+                    metadataHeaders=["From", "Subject", "Date"],
+                ),
+                request_id=str(i),
             )
-        logger.info("Built %s Gmail message payloads", len(items))
-        return items
+        batch.execute()
+
+        result = [item for item in items if item is not None]
+        logger.info("Built %s Gmail message payloads", len(result))
+        return result
 
     def clear_session(self, session_id: str | None) -> None:
         if session_id:

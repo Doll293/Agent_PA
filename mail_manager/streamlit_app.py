@@ -189,21 +189,32 @@ def main() -> None:
         logger.error("Stored UI error after login: %s", error_message)
         st.error(error_message)
 
-    try:
-        emails = gmail_client.get_recent_emails(session_id, max_results=settings.mail_max_results)
-    except Exception as exc:  
-        logger.exception("Gmail mail retrieval failed.")
-        st.error(str(exc))
-        return
+    with st.status("Chargement des mails...", expanded=False) as status:
+        try:
+            status.update(label="Lecture Gmail en cours...")
+            mail_limit = st.session_state.get("mail_limit", settings.mail_max_results)
+            emails = gmail_client.get_recent_emails(session_id, max_results=mail_limit)
+        except Exception as exc:
+            logger.exception("Gmail mail retrieval failed.")
+            status.update(label="Erreur lors de la lecture.", state="error")
+            st.error(str(exc))
+            return
 
-    if not emails:
-        logger.info("No emails returned from Gmail API.")
-        st.info(f"Aucun email trouve dans les {settings.mail_max_results} derniers messages.")
-        return
+        if not emails:
+            logger.info("No emails returned from Gmail API.")
+            status.update(label="Aucun mail trouve.", state="complete")
+            st.info(f"Aucun email trouve dans les {settings.mail_max_results} derniers messages.")
+            return
 
-    logger.info("Retrieved %s emails from Gmail API.", len(emails))
-
-    processed_emails = [workflow.run_for_mail(email, use_model=use_model) for email in emails]
+        logger.info("Retrieved %s emails from Gmail API.", len(emails))
+        status.update(label=f"Classification de {len(emails)} mails...")
+        processed_emails = []
+        progress = st.progress(0, text="Classification en cours...")
+        for i, email in enumerate(emails):
+            processed_emails.extend(workflow.run_for_batch([email], use_model=use_model))
+            progress.progress((i + 1) / len(emails), text=f"Mail {i + 1} / {len(emails)}")
+        progress.empty()
+        status.update(label=f"{len(emails)} mails charges.", state="complete")
     available_categories = ["Toutes"] + sorted({email["category"] for email in processed_emails})
 
     st.subheader("Filtres")
@@ -222,6 +233,11 @@ def main() -> None:
 
     for email in filtered_emails:
         _render_email_card(email)
+
+    if len(emails) == mail_limit:
+        if st.button("Voir plus", use_container_width=True):
+            st.session_state["mail_limit"] = mail_limit + settings.mail_max_results
+            st.rerun()
 
 
 if __name__ == "__main__":

@@ -1,20 +1,23 @@
 from mail_manager.privacy import anonymize_mail
-from mail_manager.processors import classify_mail, suggest_action
+from mail_manager.processors import classify_mails_batch, suggest_action
 
 
 class Workflow:
-    def run_for_mail(self, email_data: dict[str, str], use_model: bool = True) -> dict[str, str]:
-        anonymized = anonymize_mail(
-            email_data.get("subject", ""),
-            email_data.get("snippet", ""),
-        )
-        category = classify_mail(anonymized["subject"], anonymized["snippet"], use_model=use_model)
-        suggestion = suggest_action(category)
+    def run_for_batch(self, emails: list[dict[str, str]], use_model: bool = True) -> list[dict[str, str]]:
+        anonymized_list = [
+            anonymize_mail(e.get("subject", ""), e.get("snippet", ""))
+            for e in emails
+        ]
+        pairs = [(a["subject"], a["snippet"]) for a in anonymized_list]
+        categories = classify_mails_batch(pairs, use_model=use_model)
 
-        return {
-            **email_data,
-            "anonymized_subject": anonymized["subject"],
-            "anonymized_snippet": anonymized["snippet"],
-            "category": category,
-            "suggestion": suggestion,
-        }
+        return [
+            {
+                **email,
+                "anonymized_subject": anon["subject"],
+                "anonymized_snippet": anon["snippet"],
+                "category": category,
+                "suggestion": suggest_action(category),
+            }
+            for email, anon, category in zip(emails, anonymized_list, categories)
+        ]

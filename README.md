@@ -6,63 +6,46 @@ Version Streamlit pour lire 10 mails Gmail en lecture seule, anonymiser le texte
 
 1. Creer un fichier `.env` a partir de `.env.example`.
 2. Mettre `credentials.json` a la racine du projet.
+3. Creer un environnement virtuel et installer les dependances :
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
 
 ## Configuration Google
 
-1. Aller dans Google Cloud Console.
+1. Ouvrir Google Cloud Console.
 2. Creer un projet si besoin.
 3. Activer l'API Gmail.
-4. Creer un client OAuth 2.0 de type application web.
-5. Ajouter le redirect URI :
+4. Aller dans `Google Auth Platform > Clients`.
+5. Cliquer sur `Create client`, choisir `Web application`.
+6. Donner un nom, par exemple `mail-manager-local`.
+7. Dans `Authorized redirect URIs`, ajouter :
    `http://localhost:8501`
-6. Telecharger le fichier JSON OAuth.
-7. Le renommer en `credentials.json`.
-8. Le placer a la racine du projet.
-9. Le scope utilise par le prototype est :
-   `https://www.googleapis.com/auth/gmail.readonly`
+8. Creer le client, telecharger le JSON.
+9. Le renommer en `credentials.json` et le placer a la racine du projet.
 
-Chemin actuel :
+Le scope utilise est : `https://www.googleapis.com/auth/gmail.readonly`
 
-1. Ouvre Google Cloud Console
-2. Selectionne ou cree un projet
-3. Va dans Google Auth Platform
-4. Ouvre Clients
-5. Clique sur Create client
-6. Choisis Web application
-7. Donne un nom, par exemple `mail-manager-local`
-8. Dans Authorized redirect URIs, ajoute :
-   `http://localhost:8501`
-9. Cree le client
-10. Telecharge le JSON
-11. Renomme-le en :
-    `credentials.json`
-12. Place-le a la racine du projet
+> En mode test Google Cloud, ajouter le compte Gmail dans les `test users`.
 
-## Lancement Docker
+## Lancement
 
-```bash
-docker compose up --build
+```powershell
+streamlit run mail_manager/streamlit_app.py
 ```
 
-Puis ouvrir :
+Puis ouvrir : `http://localhost:8501`
 
-`http://localhost:8501`
-
-Pour voir plus de logs en CLI :
-
-```bash
-docker compose logs -f --tail=200 app
-```
-
-Pour un niveau de logs plus verbeux, mets dans `.env` :
+Pour des logs plus verbeux, mettre dans `.env` :
 
 ```env
 DEBUG=true
 ```
 
-Remarque :
-en developpement local, le projet autorise automatiquement OAuth en HTTP uniquement pour
-`localhost` et `127.0.0.1`. Pour un acces distant, il faut un domaine en HTTPS.
+> Le premier demarrage peut etre plus long car `transformers` telecharge le modele.
 
 ## Limites du prototype
 
@@ -70,16 +53,15 @@ en developpement local, le projet autorise automatiquement OAuth en HTTP uniquem
 - pas d'actions sur les mails
 - pas de corps complet stocke
 - pas de tests automatiques
-- le premier demarrage peut etre plus long car le modele `transformers` doit etre telecharge
+- modele `transformers` potentiellement long a charger au premier demarrage
 
+## Demo rapide
 
-# Demo rapide
-
-1. Lancer `docker compose up --build`.
+1. Lancer l'application.
 2. Ouvrir `http://localhost:8501`.
 3. Cliquer sur `Se connecter avec Gmail`.
-4. Se connecter sur la page officielle Google avec le compte de test.
+4. Se connecter avec le compte de test.
 5. Revenir sur l'application.
 6. Montrer les 10 derniers mails, la version anonymisee, la categorie et la suggestion.
-Message de fin :
-le prototype lit seulement quelques mails Gmail en lecture seule, anonymise avant le classement, et ne fait aucune action destructive.
+
+Le prototype lit seulement quelques mails Gmail en lecture seule, anonymise avant le classement, et ne fait aucune action destructive.
