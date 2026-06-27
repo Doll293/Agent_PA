@@ -135,7 +135,7 @@ def main() -> None:
     st.title("Mail Manager")
     st.write(
         "Prototype simple avec Gmail en lecture seule, anonymisation avant traitement "
-        "et classification locale."
+        "et classification 100% IA."
     )
 
     session_id = _get_session_id()
@@ -176,14 +176,13 @@ def main() -> None:
             st.session_state.pop("gmail_oauth_state", None)
             st.rerun()
 
-    action_col1, action_col2, action_col3 = st.columns([2, 2, 1])
+    action_col1, action_col2 = st.columns([2, 2])
     with action_col1:
         if st.button("Actualiser les mails", use_container_width=True):
             st.rerun()
     with action_col2:
         st.caption(f"{settings.mail_max_results} derniers mails lus au maximum")
-    with action_col3:
-        use_model = st.toggle("Modele IA", value=True, key="use_model")
+        st.caption(f"Modele IA : {settings.transformers_model}")
 
     if error_message:
         logger.error("Stored UI error after login: %s", error_message)
@@ -208,12 +207,18 @@ def main() -> None:
 
         logger.info("Retrieved %s emails from Gmail API.", len(emails))
         status.update(label=f"Classification de {len(emails)} mails...")
-        processed_emails = []
-        progress = st.progress(0, text="Classification en cours...")
-        for i, email in enumerate(emails):
-            processed_emails.extend(workflow.run_for_batch([email], use_model=use_model))
-            progress.progress((i + 1) / len(emails), text=f"Mail {i + 1} / {len(emails)}")
-        progress.empty()
+        try:
+            processed_emails = []
+            progress = st.progress(0, text="Classification IA en cours...")
+            for i, email in enumerate(emails):
+                processed_emails.extend(workflow.run_for_batch([email]))
+                progress.progress((i + 1) / len(emails), text=f"Mail {i + 1} / {len(emails)}")
+            progress.empty()
+        except Exception as exc:
+            logger.exception("AI mail classification failed.")
+            status.update(label="Erreur de classification IA.", state="error")
+            st.error(str(exc))
+            return
         status.update(label=f"{len(emails)} mails charges.", state="complete")
     available_categories = ["Toutes"] + sorted({email["category"] for email in processed_emails})
 

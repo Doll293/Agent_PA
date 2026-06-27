@@ -3,17 +3,18 @@ from mail_manager.processors import classify_mails_batch, suggest_action
 
 
 class Workflow:
-    def run_for_batch(self, emails: list[dict[str, str]], use_model: bool = True) -> list[dict[str, str]]:
+    def run_for_batch(self, emails: list[dict[str, str]]) -> list[dict[str, str]]:
         anonymized_list = [
-            anonymize_mail(e.get("subject", ""), e.get("snippet", ""))
+            anonymize_mail(e.get("subject", ""), e.get("snippet", ""), e.get("from", ""))
             for e in emails
         ]
-        pairs = [(a["subject"], a["snippet"]) for a in anonymized_list]
-        categories = classify_mails_batch(pairs, use_model=use_model)
+        pairs = [(f"{a['sender']} | {a['subject']}".strip(" |"), a["snippet"]) for a in anonymized_list]
+        categories = classify_mails_batch(pairs)
 
         return [
             {
                 **email,
+                "anonymized_sender": anon["sender"],
                 "anonymized_subject": anon["subject"],
                 "anonymized_snippet": anon["snippet"],
                 "category": category,

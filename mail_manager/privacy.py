@@ -23,8 +23,9 @@ def anonymize_text(value: str, max_length: int) -> str:
     return text
 
 
-def anonymize_mail(subject: str, snippet: str) -> dict[str, str]:
+def anonymize_mail(subject: str, snippet: str, sender: str = "") -> dict[str, str]:
     return {
+        "sender": anonymize_text(sender, max_length=120),
         "subject": anonymize_text(subject, max_length=120),
         "snippet": anonymize_text(snippet, max_length=settings.mail_preview_length),
     }

@@ -1,6 +1,6 @@
 # Mail Manager
 
-Version Streamlit pour lire 10 mails Gmail en lecture seule, anonymiser le texte, puis afficher une categorie et une suggestion simple. La classification utilise `transformers`, et retombe sur des regles locales si le modele ne peut pas etre charge.
+Version Streamlit pour lire 10 mails Gmail en lecture seule, anonymiser le texte, puis afficher une categorie et une suggestion simple. Le classement est maintenant 100% IA avec `transformers`, sans listes de mots-cles pour decider le type de mail. Les opportunites professionnelles comme les offres d'emploi, sollicitations de recruteurs et promotions B2B restent detectees via les labels de classification.
 
 ## Installation
 
@@ -45,6 +45,12 @@ Pour des logs plus verbeux, mettre dans `.env` :
 DEBUG=true
 ```
 
+Pour choisir le modele IA utilise, tu peux definir :
+
+```env
+TRANSFORMERS_MODEL=joeddav/xlm-roberta-large-xnli
+```
+
 > Le premier demarrage peut etre plus long car `transformers` telecharge le modele.
 
 ## Limites du prototype
@@ -53,7 +59,7 @@ DEBUG=true
 - pas d'actions sur les mails
 - pas de corps complet stocke
 - pas de tests automatiques
-- modele `transformers` potentiellement long a charger au premier demarrage
+- dependance au chargement du modele IA `transformers`
 
 ## Demo rapide
 
