@@ -1,98 +1,154 @@
+import json
 import logging
+from datetime import date
 
 from mail_manager.config import settings
 
 logger = logging.getLogger(__name__)
 
 CATEGORIES = [
-    "urgent",
-    "important",
-    "administratif",
-    "opportunite pro",
-    "ecole",
-    "personnel",
-    "faible priorite",
+    "tech",
+    "mode",
+    "voyage",
+    "food",
+    "maison",
+    "sport",
+    "culture",
+    "services",
+    "autre",
 ]
 
-CATEGORY_LABELS = {
-    "urgent": "action requise immediatement, deadline aujourd'hui, alerte critique",
-    "important": "securite du compte, code de verification, connexion suspecte, mot de passe",
-    "administratif": "facture, contrat, document officiel, paiement, administration",
-    "opportunite pro": "offre d'emploi, recrutement, mission freelance, prospection b2b, webinar metier, partenariat entreprise",
-    "ecole": "cours, devoir, examen, universite, professeur, projet scolaire",
-    "personnel": "message d'un ami ou de la famille, invitation, anniversaire, reseaux sociaux",
-    "faible priorite": "newsletter, publicite, promotion, notification automatique",
+_CLIENT = None
+
+SYSTEM_PROMPT = (
+    "Tu es un assistant qui analyse des emails promotionnels anonymises. "
+    "Tu reponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans markdown."
+)
+
+DEFAULT_ANALYSIS = {
+    "category": "autre",
+    "summary": "Resume indisponible.",
+    "relevance_score": 0,
+    "promo_code": "",
+    "expiry_date": "",
+    "is_fake_promo": False,
 }
 
-CLASSIFIER = None
-_CLASSIFIER_LOAD_FAILED = False
 
-
-def suggest_action(category: str) -> str:
-    if category == "urgent":
-        return "lire maintenant"
-    if category in {"important", "administratif", "ecole"}:
-        return "verifier manuellement"
-    if category == "opportunite pro":
-        return "evaluer si pertinent pour le travail"
-    if category == "personnel":
-        return "repondre plus tard"
-    return "ignorer pour le moment"
-
-
-def load_classifier():
-    global CLASSIFIER, _CLASSIFIER_LOAD_FAILED
-
-    if CLASSIFIER is not None:
-        return CLASSIFIER
-    if _CLASSIFIER_LOAD_FAILED:
-        raise RuntimeError("Le modele IA est indisponible pour cette session.")
-
-    try:
-        from transformers import pipeline
-
-        logger.info("Loading transformers model: %s", settings.transformers_model)
-        CLASSIFIER = pipeline("zero-shot-classification", model=settings.transformers_model)
-        return CLASSIFIER
-    except Exception as exc:
-        _CLASSIFIER_LOAD_FAILED = True
-        logger.exception("Unable to load transformers classifier.")
+def _get_client():
+    global _CLIENT
+    if _CLIENT is not None:
+        return _CLIENT
+    if not settings.groq_api_key:
         raise RuntimeError(
-            "Impossible de charger le modele IA. Verifie les dependances et le telechargement du modele."
-        ) from exc
+            "GROQ_API_KEY manquant dans le fichier .env. "
+            "Cree une cle gratuite sur https://console.groq.com/keys"
+        )
+    from groq import Groq
+
+    _CLIENT = Groq(api_key=settings.groq_api_key)
+    return _CLIENT
 
 
-def _label_to_category(best_label: str) -> str:
-    for category, label in CATEGORY_LABELS.items():
-        if best_label == label:
-            return category
-    logger.warning("Unknown transformers label: %s", best_label)
-    return "faible priorite"
+def _build_prompt(mails: list[dict[str, str]], preferences: str) -> str:
+    today = date.today().isoformat()
+    mail_blocks = []
+    for i, mail in enumerate(mails):
+        mail_blocks.append(
+            f"--- MAIL {i} ---\n"
+            f"Expediteur: {mail['sender']}\n"
+            f"Sujet: {mail['subject']}\n"
+            f"Contenu: {mail['body'] or mail['snippet']}"
+        )
+    mails_text = "\n\n".join(mail_blocks)
+    preferences_text = preferences.strip() or "aucune preference exprimee"
+
+    return f"""Date du jour : {today}
+Envies de l'utilisateur : {preferences_text}
+
+Analyse chacun des mails promotionnels ci-dessous et retourne un objet JSON de la forme :
+{{
+  "mails": [
+    {{
+      "index": 0,
+      "category": "une valeur parmi {json.dumps(CATEGORIES)}",
+      "summary": "resume de l'offre en 1 ou 2 phrases en francais",
+      "relevance_score": 0 a 10 selon la correspondance avec les envies de l'utilisateur (0 si aucune preference exprimee ne correspond, 5 si preference absente),
+      "promo_code": "code promo exact trouve dans le mail, sinon chaine vide",
+      "expiry_date": "date de fin de l'offre au format YYYY-MM-DD si mentionnee, sinon chaine vide",
+      "is_fake_promo": true si l'offre semble etre une promo permanente ou trompeuse, sinon false
+    }}
+  ]
+}}
+
+Regles :
+- un objet par mail, dans l'ordre, avec le bon index
+- convertis les dates relatives ("jusqu'a dimanche", "encore 48h") en date absolue a partir de la date du jour
+- ne recopie jamais de donnees personnelles dans le resume
+
+{mails_text}"""
 
 
-def classify_mail(subject: str, snippet: str) -> str:
-    return classify_mails_batch([(subject, snippet)])[0]
+def _sanitize_analysis(raw: dict) -> dict:
+    result = dict(DEFAULT_ANALYSIS)
+    if not isinstance(raw, dict):
+        return result
 
+    category = str(raw.get("category", "")).strip().lower()
+    result["category"] = category if category in CATEGORIES else "autre"
 
-def classify_mails_batch(pairs: list[tuple[str, str]]) -> list[str]:
-    classifier = load_classifier()
-    texts = [f"Sujet: {subject[:160]}\nExtrait: {snippet[:320]}" for subject, snippet in pairs]
+    result["summary"] = str(raw.get("summary", "")).strip() or DEFAULT_ANALYSIS["summary"]
 
     try:
-        results = classifier(
-            texts,
-            candidate_labels=list(CATEGORY_LABELS.values()),
-            hypothesis_template="Ce mail est {}.",
+        score = int(raw.get("relevance_score", 0))
+    except (TypeError, ValueError):
+        score = 0
+    result["relevance_score"] = max(0, min(10, score))
+
+    result["promo_code"] = str(raw.get("promo_code", "")).strip()
+    result["expiry_date"] = str(raw.get("expiry_date", "")).strip()
+    result["is_fake_promo"] = bool(raw.get("is_fake_promo", False))
+    return result
+
+
+def analyze_mails_batch(mails: list[dict[str, str]], preferences: str) -> list[dict]:
+    """Analyse tout le lot de mails anonymises en UN SEUL appel LLM.
+
+    `mails` : liste de dicts avec les cles sender/subject/snippet/body (anonymises).
+    Retourne une liste d'analyses alignee sur l'ordre d'entree.
+    """
+    if not mails:
+        return []
+
+    client = _get_client()
+    logger.info("Analyzing %s mails with Groq model %s", len(mails), settings.groq_model)
+
+    try:
+        response = client.chat.completions.create(
+            model=settings.groq_model,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": _build_prompt(mails, preferences)},
+            ],
         )
+        content = response.choices[0].message.content or "{}"
     except Exception as exc:
-        logger.exception("Transformers batch classification failed.")
-        raise RuntimeError("La classification IA a echoue pour ce lot de mails.") from exc
+        logger.exception("Groq API call failed.")
+        raise RuntimeError(f"L'appel au LLM Groq a echoue : {exc}") from exc
 
-    if isinstance(results, dict):
-        results = [results]
+    try:
+        parsed = json.loads(content)
+        raw_items = parsed.get("mails", [])
+    except json.JSONDecodeError:
+        logger.error("Groq returned invalid JSON: %s", content[:500])
+        raw_items = []
 
-    categories = []
-    for result in results:
-        labels = result.get("labels") or []
-        categories.append(_label_to_category(labels[0]) if labels else "faible priorite")
-    return categories
+    # Realigne par index, avec valeurs par defaut si un mail manque.
+    by_index: dict[int, dict] = {}
+    for item in raw_items:
+        if isinstance(item, dict) and isinstance(item.get("index"), int):
+            by_index[item["index"]] = item
+
+    return [_sanitize_analysis(by_index.get(i, {})) for i in range(len(mails))]
