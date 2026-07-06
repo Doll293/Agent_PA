@@ -1,12 +1,13 @@
-# Mail Manager
+# Mail Manager - Promotions
 
-Version Streamlit pour lire 10 mails Gmail en lecture seule, anonymiser le texte, puis afficher une categorie et une suggestion simple. Le classement est maintenant 100% IA avec `transformers`, sans listes de mots-cles pour decider le type de mail. Les opportunites professionnelles comme les offres d'emploi, sollicitations de recruteurs et promotions B2B restent detectees via les labels de classification.
+Version Streamlit qui lit les mails de l'onglet Promotions Gmail en lecture seule, anonymise le texte, puis utilise un LLM gratuit (Groq) pour produire, en un seul appel : un resume, une categorie, un score de pertinence selon vos envies, le code promo, la date d'expiration et un signalement des fausses promos permanentes.
 
 ## Installation
 
 1. Creer un fichier `.env` a partir de `.env.example`.
 2. Mettre `credentials.json` a la racine du projet.
-3. Creer un environnement virtuel et installer les dependances :
+3. Creer une cle API gratuite sur https://console.groq.com/keys et la mettre dans `GROQ_API_KEY`.
+4. Creer un environnement virtuel et installer les dependances :
 
 ```powershell
 python -m venv .venv
@@ -39,35 +40,30 @@ streamlit run mail_manager/streamlit_app.py
 
 Puis ouvrir : `http://localhost:8501`
 
-Pour des logs plus verbeux, mettre dans `.env` :
+Variables utiles dans `.env` :
 
 ```env
 DEBUG=true
+GROQ_MODEL=llama-3.3-70b-versatile
+MAIL_MAX_RESULTS=10
+MAIL_BODY_MAX_CHARS=1500
 ```
 
-Pour choisir le modele IA utilise, tu peux definir :
+## Fonctionnalites
 
-```env
-TRANSFORMERS_MODEL=joeddav/xlm-roberta-large-xnli
-```
-
-> Le premier demarrage peut etre plus long car `transformers` telecharge le modele.
+- lecture de l'onglet Promotions uniquement (`CATEGORY_PROMOTIONS`)
+- anonymisation (emails, telephones, liens) avant envoi au LLM
+- resume + categorie + score de pertinence /10 selon les envies saisies
+- extraction du code promo avec bouton copier
+- date d'expiration avec badge d'urgence (rouge si moins de 3 jours)
+- detection des promos permanentes suspectes
+- lien direct vers le mail dans Gmail
+- lien de desabonnement (header `List-Unsubscribe`) quand disponible
+- tri par pertinence, filtres par categorie et recherche texte
 
 ## Limites du prototype
 
 - pas de base de donnees
-- pas d'actions sur les mails
-- pas de corps complet stocke
+- pas d'actions sur les mails (le desabonnement ouvre simplement le lien de l'expediteur)
 - pas de tests automatiques
-- dependance au chargement du modele IA `transformers`
-
-## Demo rapide
-
-1. Lancer l'application.
-2. Ouvrir `http://localhost:8501`.
-3. Cliquer sur `Se connecter avec Gmail`.
-4. Se connecter avec le compte de test.
-5. Revenir sur l'application.
-6. Montrer les 10 derniers mails, la version anonymisee, la categorie et la suggestion.
-
-Le prototype lit seulement quelques mails Gmail en lecture seule, anonymise avant le classement, et ne fait aucune action destructive.
+- quota du tier gratuit Groq (largement suffisant pour un usage perso)
