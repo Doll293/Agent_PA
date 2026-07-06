@@ -187,8 +187,15 @@ def _run_analysis(session_id: str, preferences: str, mail_limit: int) -> None:
         if not emails:
             status.update(label="Aucun mail trouve.", state="complete")
             st.session_state["processed_emails"] = []
-            st.info("Aucun mail dans l'onglet Promotions.")
+            st.warning(
+                "Aucun mail de promotion trouve, meme avec les strategies de repli. "
+                "Verifiez que ce compte recoit bien des newsletters/promos, et que "
+                "l'onglet Promotions est active dans Gmail (Parametres > Boite de reception > "
+                "Type de boite : Par defaut + categorie Promotions cochee)."
+            )
             return
+
+        st.session_state["fetch_strategy"] = gmail_client.last_fetch_strategy
 
         status.update(label=f"Analyse LLM de {len(emails)} mails (un seul appel)...")
         try:
@@ -275,6 +282,9 @@ def main() -> None:
 
     # --- Filtres ---
     st.subheader("Filtres")
+    fetch_strategy = st.session_state.get("fetch_strategy", "")
+    if fetch_strategy and fetch_strategy != "label CATEGORY_PROMOTIONS":
+        st.caption(f"Source des mails : {fetch_strategy} (l'onglet Promotions semble vide ou desactive sur ce compte)")
     available_categories = sorted({email["category"] for email in processed_emails})
     filter_col1, filter_col2 = st.columns([1, 1])
     with filter_col1:
