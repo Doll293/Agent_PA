@@ -1,5 +1,6 @@
 import logging
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -93,49 +94,122 @@ def _handle_oauth_callback(session_id: str) -> None:
         st.rerun()
 
 
-def _render_email_card(email: dict[str, str]) -> None:
+def _expiry_info(expiry_date: str) -> tuple[str, str] | None:
+    """Retourne (texte, couleur streamlit) pour la date d'expiration, ou None."""
+    if not expiry_date:
+        return None
+    try:
+        expiry = datetime.strptime(expiry_date, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+    days = (expiry - date.today()).days
+    if days < 0:
+        return ("Offre expiree", "gray")
+    if days == 0:
+        return ("Expire aujourd'hui", "red")
+    if days <= 3:
+        return (f"Expire dans {days} jour(s)", "red")
+    if days <= 7:
+        return (f"Expire dans {days} jours", "orange")
+    return (f"Expire le {expiry.strftime('%d/%m/%Y')}", "green")
+
+
+def _render_email_card(email: dict) -> None:
     with st.container(border=True):
-        st.markdown(f"**{email['from']}**")
-        st.caption(email["date"])
+        header_col, score_col = st.columns([4, 1])
+        with header_col:
+            st.markdown(f"**{email['from']}**")
+            st.caption(email["date"])
+        with score_col:
+            st.metric("Pertinence", f"{email['relevance_score']}/10")
+
         st.subheader(email["subject"])
-        st.write(email["snippet"])
-        st.write(f"Categorie : **{email['category']}**")
-        st.write(f"Suggestion : **{email['suggestion']}**")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.caption("Sujet envoye au traitement")
-            st.write(email["anonymized_subject"])
-        with col2:
-            st.caption("Extrait envoye au traitement")
+        st.write(email["summary"])
+
+        badges = [f":blue-badge[{email['category']}]"]
+        expiry = _expiry_info(email.get("expiry_date", ""))
+        if expiry:
+            text, color = expiry
+            badges.append(f":{color}-badge[{text}]")
+        if email.get("is_fake_promo"):
+            badges.append(":violet-badge[Promo permanente suspecte]")
+        st.markdown(" ".join(badges))
+
+        if email.get("promo_code"):
+            st.caption("Code promo")
+            st.code(email["promo_code"], language=None)
+
+        link_col, unsub_col = st.columns(2)
+        with link_col:
+            st.link_button("Ouvrir dans Gmail", email["gmail_link"], use_container_width=True)
+        with unsub_col:
+            if email.get("unsubscribe_link"):
+                st.link_button("Se desabonner", email["unsubscribe_link"], use_container_width=True)
+
+        with st.expander("Donnees envoyees au LLM (anonymisees)"):
+            st.write(f"Expediteur : {email['anonymized_sender']}")
+            st.write(f"Sujet : {email['anonymized_subject']}")
             st.write(email["anonymized_snippet"])
 
 
-def _filter_emails(emails: list[dict[str, str]], selected_category: str, search_text: str) -> list[dict[str, str]]:
+def _filter_emails(emails: list[dict], selected_categories: list[str], search_text: str) -> list[dict]:
     filtered = emails
 
-    if selected_category != "Toutes":
-        filtered = [email for email in filtered if email["category"] == selected_category]
+    if selected_categories:
+        filtered = [email for email in filtered if email["category"] in selected_categories]
 
     normalized_search = search_text.strip().lower()
-    if not normalized_search:
-        return filtered
+    if normalized_search:
+        filtered = [
+            email
+            for email in filtered
+            if normalized_search in email["from"].lower()
+            or normalized_search in email["subject"].lower()
+            or normalized_search in email["summary"].lower()
+            or normalized_search in email["category"].lower()
+        ]
 
-    return [
-        email
-        for email in filtered
-        if normalized_search in email["from"].lower()
-        or normalized_search in email["subject"].lower()
-        or normalized_search in email["snippet"].lower()
-        or normalized_search in email["category"].lower()
-    ]
+    return sorted(filtered, key=lambda e: e["relevance_score"], reverse=True)
+
+
+def _run_analysis(session_id: str, preferences: str, mail_limit: int) -> None:
+    with st.status("Analyse des promotions...", expanded=False) as status:
+        try:
+            status.update(label="Lecture des mails Promotions...")
+            emails = gmail_client.get_promo_emails(session_id, max_results=mail_limit)
+        except Exception as exc:
+            logger.exception("Gmail promo retrieval failed.")
+            status.update(label="Erreur lors de la lecture Gmail.", state="error")
+            st.error(str(exc))
+            return
+
+        if not emails:
+            status.update(label="Aucun mail trouve.", state="complete")
+            st.session_state["processed_emails"] = []
+            st.info("Aucun mail dans l'onglet Promotions.")
+            return
+
+        status.update(label=f"Analyse LLM de {len(emails)} mails (un seul appel)...")
+        try:
+            processed = workflow.run_for_batch(emails, preferences=preferences)
+        except Exception as exc:
+            logger.exception("LLM analysis failed.")
+            status.update(label="Erreur d'analyse LLM.", state="error")
+            st.error(str(exc))
+            return
+
+        st.session_state["processed_emails"] = processed
+        st.session_state["analyzed_count"] = len(emails)
+        status.update(label=f"{len(processed)} promotions analysees.", state="complete")
 
 
 def main() -> None:
     st.set_page_config(page_title="Mail Manager", layout="centered")
-    st.title("Mail Manager")
+    st.title("Mail Manager - Promotions")
     st.write(
-        "Prototype simple avec Gmail en lecture seule, anonymisation avant traitement "
-        "et classification 100% IA."
+        "Lit vos mails de promotion Gmail en lecture seule, les anonymise, "
+        "puis les resume et les classe selon vos envies avec un LLM (Groq)."
     )
 
     session_id = _get_session_id()
@@ -153,7 +227,7 @@ def main() -> None:
         return
 
     if not gmail_client.is_connected(session_id):
-        st.info("Connexion Gmail requise pour lire les 10 derniers messages.")
+        st.info("Connexion Gmail requise pour lire vos mails de promotion.")
         auth_url, state = gmail_client.build_auth_url(redirect_uri=settings.streamlit_redirect_uri)
         st.session_state["gmail_oauth_state"] = state
         st.session_state["gmail_session_id"] = state
@@ -172,76 +246,56 @@ def main() -> None:
     with col2:
         if st.button("Deconnecter", use_container_width=True):
             gmail_client.clear_session(session_id)
-            st.session_state.pop("gmail_credentials", None)
-            st.session_state.pop("gmail_oauth_state", None)
+            for key in ("gmail_credentials", "gmail_oauth_state", "processed_emails", "analyzed_count"):
+                st.session_state.pop(key, None)
             st.rerun()
-
-    action_col1, action_col2 = st.columns([2, 2])
-    with action_col1:
-        if st.button("Actualiser les mails", use_container_width=True):
-            st.rerun()
-    with action_col2:
-        st.caption(f"{settings.mail_max_results} derniers mails lus au maximum")
-        st.caption(f"Modele IA : {settings.transformers_model}")
 
     if error_message:
         logger.error("Stored UI error after login: %s", error_message)
         st.error(error_message)
 
-    with st.status("Chargement des mails...", expanded=False) as status:
-        try:
-            status.update(label="Lecture Gmail en cours...")
-            mail_limit = st.session_state.get("mail_limit", settings.mail_max_results)
-            emails = gmail_client.get_recent_emails(session_id, max_results=mail_limit)
-        except Exception as exc:
-            logger.exception("Gmail mail retrieval failed.")
-            status.update(label="Erreur lors de la lecture.", state="error")
-            st.error(str(exc))
-            return
+    # --- Preferences utilisateur ---
+    st.subheader("Vos envies")
+    preferences = st.text_area(
+        "Decrivez ce qui vous interesse en ce moment",
+        placeholder="Ex : je cherche des promos tech (ecouteurs, SSD), des billets de train et des offres de restaurants.",
+        key="preferences",
+    )
 
-        if not emails:
-            logger.info("No emails returned from Gmail API.")
-            status.update(label="Aucun mail trouve.", state="complete")
-            st.info(f"Aucun email trouve dans les {settings.mail_max_results} derniers messages.")
-            return
+    mail_limit = st.session_state.get("mail_limit", settings.mail_max_results)
+    if st.button("Analyser mes promotions", type="primary", use_container_width=True):
+        _run_analysis(session_id, preferences, mail_limit)
 
-        logger.info("Retrieved %s emails from Gmail API.", len(emails))
-        status.update(label=f"Classification de {len(emails)} mails...")
-        try:
-            processed_emails = []
-            progress = st.progress(0, text="Classification IA en cours...")
-            for i, email in enumerate(emails):
-                processed_emails.extend(workflow.run_for_batch([email]))
-                progress.progress((i + 1) / len(emails), text=f"Mail {i + 1} / {len(emails)}")
-            progress.empty()
-        except Exception as exc:
-            logger.exception("AI mail classification failed.")
-            status.update(label="Erreur de classification IA.", state="error")
-            st.error(str(exc))
-            return
-        status.update(label=f"{len(emails)} mails charges.", state="complete")
-    available_categories = ["Toutes"] + sorted({email["category"] for email in processed_emails})
+    processed_emails = st.session_state.get("processed_emails")
+    if processed_emails is None:
+        st.caption(f"Modele LLM : {settings.groq_model} - {mail_limit} mails analyses au maximum")
+        return
+    if not processed_emails:
+        return
 
+    # --- Filtres ---
     st.subheader("Filtres")
-    filter_col1, filter_col2 = st.columns([1, 2])
+    available_categories = sorted({email["category"] for email in processed_emails})
+    filter_col1, filter_col2 = st.columns([1, 1])
     with filter_col1:
-        selected_category = st.selectbox("Categorie", available_categories, index=0)
+        selected_categories = st.multiselect("Categories", available_categories, default=[])
     with filter_col2:
-        search_text = st.text_input("Recherche", placeholder="expediteur, sujet, extrait...")
+        search_text = st.text_input("Recherche", placeholder="expediteur, sujet, resume...")
 
-    filtered_emails = _filter_emails(processed_emails, selected_category, search_text)
-    st.caption(f"{len(filtered_emails)} mail(s) affiche(s) sur {len(processed_emails)}")
+    filtered_emails = _filter_emails(processed_emails, selected_categories, search_text)
+    st.caption(f"{len(filtered_emails)} promo(s) affichee(s) sur {len(processed_emails)}, triees par pertinence")
 
     if not filtered_emails:
-        st.info("Aucun mail ne correspond au filtre actuel.")
+        st.info("Aucune promo ne correspond au filtre actuel.")
         return
 
     for email in filtered_emails:
         _render_email_card(email)
 
-    if len(emails) == mail_limit:
-        if st.button("Voir plus", use_container_width=True):
+    if st.session_state.get("analyzed_count", 0) == mail_limit:
+        if st.button("Analyser plus de mails", use_container_width=True):
             st.session_state["mail_limit"] = mail_limit + settings.mail_max_results
+            _run_analysis(session_id, preferences, mail_limit + settings.mail_max_results)
             st.rerun()
 
 
