@@ -4,7 +4,5 @@ google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.2
 requests==2.32.3
 streamlit==1.45.1
-transformers==4.52.4
-torch==2.7.0
-torchvision
-sentencepiece
+groq==0.28.0
+beautifulsoup4==4.12.3
