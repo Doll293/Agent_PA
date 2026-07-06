@@ -29,8 +29,12 @@ class Settings:
         self.session_secret = os.getenv("SESSION_SECRET", "change-me")
         self.mail_preview_length = int(os.getenv("MAIL_PREVIEW_LENGTH", "220"))
         self.mail_max_results = int(os.getenv("MAIL_MAX_RESULTS", "10"))
+        self.mail_body_max_chars = int(os.getenv("MAIL_BODY_MAX_CHARS", "1500"))
         self.debug = os.getenv("DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
-        self.transformers_model = os.getenv("TRANSFORMERS_MODEL", "joeddav/xlm-roberta-large-xnli")
+
+        # LLM Groq
+        self.groq_api_key = os.getenv("GROQ_API_KEY", "")
+        self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
 settings = Settings()
