@@ -1,7 +1,10 @@
+import base64
+import re
 from typing import Any
 from uuid import uuid4
 import logging
 
+from bs4 import BeautifulSoup
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -11,6 +14,8 @@ from mail_manager.config import settings
 
 logger = logging.getLogger(__name__)
 
+UNSUBSCRIBE_HTTP_RE = re.compile(r"<(https?://[^>]+)>")
+
 
 def _get_header(headers: list[dict[str, str]], name: str, default: str = "") -> str:
     wanted = name.lower()
@@ -18,6 +23,55 @@ def _get_header(headers: list[dict[str, str]], name: str, default: str = "") -> 
         if header.get("name", "").lower() == wanted:
             return header.get("value", default)
     return default
+
+
+def _decode_body_data(data: str) -> str:
+    padded = data + "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+    except Exception:
+        logger.warning("Failed to decode a mail body part.")
+        return ""
+
+
+def _walk_parts(payload: dict[str, Any]) -> tuple[str, str]:
+    """Retourne (text_plain, text_html) en parcourant recursivement les parts MIME."""
+    plain, html = "", ""
+    mime = payload.get("mimeType", "")
+    data = payload.get("body", {}).get("data")
+
+    if data:
+        if mime == "text/plain":
+            plain += _decode_body_data(data)
+        elif mime == "text/html":
+            html += _decode_body_data(data)
+
+    for part in payload.get("parts", []) or []:
+        sub_plain, sub_html = _walk_parts(part)
+        plain += sub_plain
+        html += sub_html
+    return plain, html
+
+
+def _extract_body_text(payload: dict[str, Any], max_chars: int) -> str:
+    plain, html = _walk_parts(payload)
+    text = plain.strip()
+    if not text and html:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        text = soup.get_text(separator=" ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
+def _extract_unsubscribe_link(headers: list[dict[str, str]]) -> str:
+    """Extrait un lien http(s) du header List-Unsubscribe (ignore les mailto:)."""
+    raw = _get_header(headers, "List-Unsubscribe", "")
+    if not raw:
+        return ""
+    match = UNSUBSCRIBE_HTTP_RE.search(raw)
+    return match.group(1) if match else ""
 
 
 class GmailClient:
@@ -106,17 +160,23 @@ class GmailClient:
         flow.fetch_token(authorization_response=full_callback_url)
         self._credentials_store[session_id] = flow.credentials
 
-    def get_recent_emails(self, session_id: str | None, max_results: int = 10) -> list[dict[str, Any]]:
+    def get_promo_emails(self, session_id: str | None, max_results: int = 10) -> list[dict[str, Any]]:
+        """Lit les mails de l'onglet Promotions avec leur corps complet (tronque)."""
         creds = self.load_credentials(session_id)
         if not creds:
             logger.warning("No Gmail credentials found for session %s", session_id)
             return []
 
-        logger.info("Fetching up to %s recent Gmail messages for session %s", max_results, session_id)
+        logger.info("Fetching up to %s promo messages for session %s", max_results, session_id)
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        results = service.users().messages().list(userId="me", maxResults=max_results).execute()
+        results = (
+            service.users()
+            .messages()
+            .list(userId="me", labelIds=["CATEGORY_PROMOTIONS"], maxResults=max_results)
+            .execute()
+        )
         messages = results.get("messages", [])
-        logger.info("Gmail API returned %s message ids", len(messages))
+        logger.info("Gmail API returned %s promo message ids", len(messages))
 
         items: list[dict[str, Any] | None] = [None] * len(messages)
 
@@ -127,29 +187,28 @@ class GmailClient:
             idx = int(request_id)
             payload = response.get("payload", {})
             headers = payload.get("headers", [])
+            message_id = response.get("id", "")
             items[idx] = {
-                "id": response.get("id"),
+                "id": message_id,
                 "from": _get_header(headers, "From", "Inconnu"),
                 "subject": _get_header(headers, "Subject", "(sans sujet)"),
                 "date": _get_header(headers, "Date", ""),
                 "snippet": response.get("snippet", ""),
+                "body_text": _extract_body_text(payload, settings.mail_body_max_chars),
+                "unsubscribe_link": _extract_unsubscribe_link(headers),
+                "gmail_link": f"https://mail.google.com/mail/u/0/#all/{message_id}",
             }
 
         batch = service.new_batch_http_request(callback=_on_message)
         for i, message in enumerate(messages):
             batch.add(
-                service.users().messages().get(
-                    userId="me",
-                    id=message["id"],
-                    format="metadata",
-                    metadataHeaders=["From", "Subject", "Date"],
-                ),
+                service.users().messages().get(userId="me", id=message["id"], format="full"),
                 request_id=str(i),
             )
         batch.execute()
 
         result = [item for item in items if item is not None]
-        logger.info("Built %s Gmail message payloads", len(result))
+        logger.info("Built %s promo message payloads", len(result))
         return result
 
     def clear_session(self, session_id: str | None) -> None:
