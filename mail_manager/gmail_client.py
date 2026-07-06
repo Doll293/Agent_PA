@@ -79,6 +79,7 @@ class GmailClient:
         self.provider_label = "Gmail"
         self.scopes = [settings.gmail_scope]
         self._credentials_store: dict[str, Credentials] = {}
+        self.last_fetch_strategy = ""
 
     def is_configured(self) -> bool:
         return settings.gmail_credentials_file.exists()
@@ -169,14 +170,29 @@ class GmailClient:
 
         logger.info("Fetching up to %s promo messages for session %s", max_results, session_id)
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        results = (
-            service.users()
-            .messages()
-            .list(userId="me", labelIds=["CATEGORY_PROMOTIONS"], maxResults=max_results)
-            .execute()
-        )
-        messages = results.get("messages", [])
-        logger.info("Gmail API returned %s promo message ids", len(messages))
+
+        # Cascade de strategies : certains comptes (Workspace, onglets desactives)
+        # n'ont pas de categorie Promotions. On tente du plus precis au plus large.
+        strategies: list[tuple[str, dict[str, Any]]] = [
+            ("label CATEGORY_PROMOTIONS", {"labelIds": ["CATEGORY_PROMOTIONS"]}),
+            ("requete category:promotions", {"q": "category:promotions"}),
+            ("heuristique unsubscribe", {"q": "unsubscribe -in:sent -in:chat"}),
+        ]
+
+        messages: list[dict[str, Any]] = []
+        self.last_fetch_strategy = ""
+        for strategy_name, params in strategies:
+            results = (
+                service.users()
+                .messages()
+                .list(userId="me", maxResults=max_results, **params)
+                .execute()
+            )
+            messages = results.get("messages", [])
+            logger.info("Strategy '%s' returned %s message ids", strategy_name, len(messages))
+            if messages:
+                self.last_fetch_strategy = strategy_name
+                break
 
         items: list[dict[str, Any] | None] = [None] * len(messages)
 
