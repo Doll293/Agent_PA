@@ -1,73 +1,139 @@
-# Mail Manager
+# Mail Manager — Assistant Promos IA
 
-Version Streamlit pour lire 10 mails Gmail en lecture seule, anonymiser le texte, puis afficher une categorie et une suggestion simple. Le classement est maintenant 100% IA avec `transformers`, sans listes de mots-cles pour decider le type de mail. Les opportunites professionnelles comme les offres d'emploi, sollicitations de recruteurs et promotions B2B restent detectees via les labels de classification.
+Application Streamlit qui lit les emails de l'onglet **Promotions** de Gmail, les anonymise, puis utilise **Groq (LLM)** pour :
+
+- extraire les infos clés de chaque promo (entreprise, code promo, réduction, date d'expiration)
+- filtrer les vraies promos des newsletters / confirmations
+- classer par catégorie (mode, tech, voyage, food...)
+- générer une **fiche récapitulative** par jour / semaine / mois
+- discuter avec un **assistant chat** qui connaît vos promos et propose des recommandations
+
+Connexion Gmail via **IMAP + mot de passe d'application** (aucun `credentials.json` ni Google Cloud Console requis).
+
+## Fonctionnalités
+
+- **Récupération ciblée** — utilise `X-GM-RAW category:promotions` pour ne lire que les emails de l'onglet Promotions
+- **Analyse IA batch** — 8 mails traités par appel API Groq (rapide)
+- **Cache par `message_id`** — pas de réanalyse au refresh
+- **Reconnexion IMAP automatique** — la session se reprend seule entre les pages
+- **Boutons directs** — "Voir dans Gmail" et "Se désabonner" (via header `List-Unsubscribe`)
+- **Fiche promos** — tableau récap filtrable par période (jour/semaine/mois)
+- **Chat IA** — page dédiée pour poser des questions sur vos promos, avec liens cliquables vers chaque mail
 
 ## Installation
 
-1. Creer un fichier `.env` a partir de `.env.example`.
-2. Mettre `credentials.json` a la racine du projet.
-3. Creer un environnement virtuel et installer les dependances :
+1. Cloner le repo et créer un environnement virtuel :
 
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # macOS/Linux
+# ou : .venv\Scripts\Activate.ps1  (Windows PowerShell)
+```
+
+2. Installer les dépendances :
+
+```bash
 pip install -r requirements.txt
 ```
 
-## Configuration Google
+3. Créer le fichier `.env` à partir de `.env.example` et le compléter (voir section suivante).
 
-1. Ouvrir Google Cloud Console.
-2. Creer un projet si besoin.
-3. Activer l'API Gmail.
-4. Aller dans `Google Auth Platform > Clients`.
-5. Cliquer sur `Create client`, choisir `Web application`.
-6. Donner un nom, par exemple `mail-manager-local`.
-7. Dans `Authorized redirect URIs`, ajouter :
-   `http://localhost:8501`
-8. Creer le client, telecharger le JSON.
-9. Le renommer en `credentials.json` et le placer a la racine du projet.
+## Configuration
 
-Le scope utilise est : `https://www.googleapis.com/auth/gmail.readonly`
+### 1. Clé API Groq (gratuite)
 
-> En mode test Google Cloud, ajouter le compte Gmail dans les `test users`.
+1. Créer un compte sur [console.groq.com](https://console.groq.com)
+2. Aller sur [console.groq.com/keys](https://console.groq.com/keys)
+3. Cliquer **Create API Key** → copier la clé (commence par `gsk_`)
+4. La coller dans le `.env` :
+
+```env
+GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxx
+GROQ_MODEL=llama-3.3-70b-versatile
+```
+
+### 2. Mot de passe d'application Gmail
+
+1. Aller sur [myaccount.google.com/security](https://myaccount.google.com/security)
+2. Activer la **validation en deux étapes**
+3. Ouvrir [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+4. Créer un mot de passe (nom : `Mail Manager`)
+5. Copier le code à 16 caractères — vous le collerez dans le formulaire de login
+
+> Le mot de passe n'est jamais écrit sur le disque, il est gardé en mémoire pendant la session Streamlit uniquement.
 
 ## Lancement
 
-```powershell
+```bash
 streamlit run mail_manager/streamlit_app.py
 ```
 
-Puis ouvrir : `http://localhost:8501`
+Ouvrir [http://localhost:8501](http://localhost:8501). Se connecter avec son email Gmail + mot de passe d'application.
 
-Pour des logs plus verbeux, mettre dans `.env` :
+## Navigation
 
-```env
-DEBUG=true
+L'app a deux pages accessibles depuis la sidebar :
+
+### Page principale — Fiche Promos
+
+- Choix du nombre de mails (20, 50, 100, 200)
+- Bouton **Charger les mails promos** → récupère depuis l'onglet Promotions Gmail
+- Onglet **Fiche Promos** — tableau récap + cartes filtrable par jour / semaine / mois
+- Onglet **Par catégorie** — promos groupées par type (mode, tech, voyage...)
+- Chaque carte : boutons **Voir dans Gmail** et **Se désabonner**
+
+### Page Chat Promos
+
+- Chat avec l'IA qui connaît toutes vos promos chargées
+- Suggestions rapides : *"Résume-moi les meilleures promos"*, *"Quelles expirent bientôt ?"*, etc.
+- Chaque `#id` dans la réponse est un lien cliquable vers le mail Gmail
+- Historique de conversation persistant dans la session
+
+## Variables d'environnement
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `GROQ_API_KEY` | *(requis)* | Clé API Groq |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Modèle Groq à utiliser |
+| `MAIL_MAX_RESULTS` | `10` | Nombre de mails par défaut |
+| `MAIL_PREVIEW_LENGTH` | `220` | Longueur de l'extrait affiché |
+| `SESSION_SECRET` | `change-me` | Secret de session |
+| `DEBUG` | `false` | Active les logs verbeux |
+
+## Architecture
+
+```
+mail_manager/
+├── streamlit_app.py       # Page principale (login + fiche promos)
+├── pages/
+│   └── 1_Chat_Promos.py   # Page chat IA
+├── gmail_client.py        # Client IMAP Gmail (login, fetch, unsubscribe)
+├── processors.py          # Analyse Groq (batch + JSON)
+├── workflow.py            # Anonymisation + analyse
+├── privacy.py             # Anonymisation avant envoi à l'IA
+└── config.py              # Chargement .env
 ```
 
-Pour choisir le modele IA utilise, tu peux definir :
+## Sécurité
 
-```env
-TRANSFORMERS_MODEL=joeddav/xlm-roberta-large-xnli
-```
+- Les mails sont **anonymisés** (emails, numéros, noms) avant envoi à l'IA
+- Seul le contenu anonymisé quitte votre machine (vers l'API Groq)
+- Aucune écriture sur disque : credentials, promos, cache — tout en mémoire session
+- Connexion Gmail en **lecture seule** (IMAP), pas d'action destructive possible
 
-> Le premier demarrage peut etre plus long car `transformers` telecharge le modele.
+## Limites
 
-## Limites du prototype
+- Pas de base de données — les analyses sont perdues à la fermeture de l'onglet
+- L'onglet Gmail "Promotions" doit être activé pour que le filtre côté serveur fonctionne
+- Limite de 6000 tokens/minute sur le tier gratuit Groq (l'app compacte le contexte pour rester sous cette limite)
+- Pas d'action sur les mails (suppression, archivage) — seulement lecture + liens
 
-- pas de base de donnees
-- pas d'actions sur les mails
-- pas de corps complet stocke
-- pas de tests automatiques
-- dependance au chargement du modele IA `transformers`
+## Dépannage
 
-## Demo rapide
+**Connexion IMAP échoue** — vérifier que la 2FA est active et que le mot de passe d'application est correctement copié (sans espaces)
 
-1. Lancer l'application.
-2. Ouvrir `http://localhost:8501`.
-3. Cliquer sur `Se connecter avec Gmail`.
-4. Se connecter avec le compte de test.
-5. Revenir sur l'application.
-6. Montrer les 10 derniers mails, la version anonymisee, la categorie et la suggestion.
+**"Aucun email trouvé dans l'onglet Promotions"** — activer l'onglet Promotions dans Gmail (Paramètres → Boîte de réception → Type de boîte → Par défaut avec onglets)
 
-Le prototype lit seulement quelques mails Gmail en lecture seule, anonymise avant le classement, et ne fait aucune action destructive.
+**Rate limit Groq (413)** — attendre 1 minute ou réduire le nombre de mails chargés
+
+**Modèle décommissionné** — mettre à jour `GROQ_MODEL` dans `.env` avec un modèle actuel (voir [console.groq.com/docs/models](https://console.groq.com/docs/models))
