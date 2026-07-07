@@ -1,158 +1,161 @@
-from typing import Any
-from uuid import uuid4
+import imaplib
+import email
+import re
+from email.header import decode_header
+from typing import Optional
 import logging
-
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-
-from mail_manager.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-def _get_header(headers: list[dict[str, str]], name: str, default: str = "") -> str:
-    wanted = name.lower()
-    for header in headers:
-        if header.get("name", "").lower() == wanted:
-            return header.get("value", default)
-    return default
+def _decode_str(value: str) -> str:
+    parts = decode_header(value or "")
+    result = []
+    for part, enc in parts:
+        if isinstance(part, bytes):
+            result.append(part.decode(enc or "utf-8", errors="replace"))
+        else:
+            result.append(part)
+    return "".join(result)
+
+
+def _extract_unsubscribe(header_value: str) -> tuple:
+    """Retourne (unsubscribe_url, unsubscribe_email) depuis le header List-Unsubscribe."""
+    if not header_value:
+        return "", ""
+    url = ""
+    mailto = ""
+    matches = re.findall(r"<([^>]+)>", header_value)
+    for m in matches:
+        if m.startswith("mailto:") and not mailto:
+            mailto = m.replace("mailto:", "")
+        elif m.startswith("http") and not url:
+            url = m
+    return url, mailto
 
 
 class GmailClient:
+    IMAP_HOST = "imap.gmail.com"
+    IMAP_PORT = 993
+
     def __init__(self) -> None:
-        self.provider_label = "Gmail"
-        self.scopes = [settings.gmail_scope]
-        self._credentials_store: dict[str, Credentials] = {}
+        self._sessions: dict = {}
 
     def is_configured(self) -> bool:
-        return settings.gmail_credentials_file.exists()
+        return True
 
-    def get_configuration_error(self) -> str | None:
-        if self.is_configured():
+    def get_configuration_error(self) -> Optional[str]:
+        return None
+
+    def connect(self, email_address: str, app_password: str) -> Optional[str]:
+        try:
+            mail = imaplib.IMAP4_SSL(self.IMAP_HOST, self.IMAP_PORT)
+            mail.login(email_address, app_password)
+            session_id = email_address
+            self._sessions[session_id] = mail
+            logger.info("IMAP connection successful for %s", email_address)
+            return session_id
+        except imaplib.IMAP4.error as e:
+            logger.error("IMAP login failed: %s", e)
             return None
-        return "Le fichier credentials.json est manquant a la racine du projet."
 
-    def create_session_id(self) -> str:
-        return uuid4().hex
+    def is_connected(self, session_id: Optional[str]) -> bool:
+        if not session_id or session_id not in self._sessions:
+            return False
+        try:
+            self._sessions[session_id].noop()
+            return True
+        except Exception:
+            return False
 
-    def load_credentials(self, session_id: str | None) -> Credentials | None:
-        if not session_id:
-            return None
+    def clear_session(self, session_id: Optional[str]) -> None:
+        if session_id and session_id in self._sessions:
+            try:
+                self._sessions[session_id].logout()
+            except Exception:
+                pass
+            del self._sessions[session_id]
 
-        creds = self._credentials_store.get(session_id)
-        if not creds:
-            return None
-
-        if creds.expired and creds.refresh_token:
-            logger.info("Refreshing Gmail credentials for session %s", session_id)
-            creds.refresh(Request())
-            self._credentials_store[session_id] = creds
-        return creds
-
-    def serialize_credentials(self, session_id: str | None) -> dict[str, Any] | None:
-        creds = self.load_credentials(session_id)
-        if not creds:
-            return None
-        return {
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": creds.scopes,
-        }
-
-    def restore_credentials(self, session_id: str | None, raw_credentials: dict[str, Any] | None) -> None:
-        if not session_id or not raw_credentials:
-            return
-        self._credentials_store[session_id] = Credentials.from_authorized_user_info(raw_credentials, self.scopes)
-
-    def is_connected(self, session_id: str | None) -> bool:
-        creds = self.load_credentials(session_id)
-        return bool(creds and creds.valid)
-
-    def build_auth_url(self, redirect_uri: str | None = None) -> tuple[str, str]:
-        final_redirect_uri = redirect_uri or settings.google_redirect_uri
-        logger.info("Building Gmail OAuth URL with redirect_uri=%s", final_redirect_uri)
-        flow = Flow.from_client_secrets_file(
-            str(settings.gmail_credentials_file),
-            scopes=self.scopes,
-            redirect_uri=final_redirect_uri,
-        )
-        auth_url, state = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent",
-        )
-        return auth_url, state
-
-    def fetch_token_from_callback(
-        self,
-        state: str,
-        full_callback_url: str,
-        session_id: str,
-        redirect_uri: str | None = None,
-    ) -> None:
-        final_redirect_uri = redirect_uri or settings.google_redirect_uri
-        logger.info("Fetching Gmail OAuth token with redirect_uri=%s", final_redirect_uri)
-        flow = Flow.from_client_secrets_file(
-            str(settings.gmail_credentials_file),
-            scopes=self.scopes,
-            state=state,
-            redirect_uri=final_redirect_uri,
-        )
-        flow.fetch_token(authorization_response=full_callback_url)
-        self._credentials_store[session_id] = flow.credentials
-
-    def get_recent_emails(self, session_id: str | None, max_results: int = 10) -> list[dict[str, Any]]:
-        creds = self.load_credentials(session_id)
-        if not creds:
-            logger.warning("No Gmail credentials found for session %s", session_id)
+    def get_promo_emails(self, session_id: Optional[str], max_results: int = 30) -> list:
+        """Recupere uniquement les mails de l'onglet Promotions de Gmail via X-GM-RAW."""
+        if not session_id or session_id not in self._sessions:
             return []
 
-        logger.info("Fetching up to %s recent Gmail messages for session %s", max_results, session_id)
-        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        results = service.users().messages().list(userId="me", maxResults=max_results).execute()
-        messages = results.get("messages", [])
-        logger.info("Gmail API returned %s message ids", len(messages))
+        mail = self._sessions[session_id]
+        try:
+            mail.select("INBOX")
+            typ, data = mail.search(None, 'X-GM-RAW', '"category:promotions"')
+            if typ != "OK":
+                logger.warning("X-GM-RAW search failed, fallback to ALL")
+                _, data = mail.search(None, "ALL")
 
-        items: list[dict[str, Any] | None] = [None] * len(messages)
+            ids = data[0].split()
+            recent_ids = ids[-max_results:][::-1]
+            logger.info("Found %s promotion emails (fetching last %s)", len(ids), len(recent_ids))
 
-        def _on_message(request_id: str, response: Any, exception: Any) -> None:
-            if exception:
-                logger.error("Failed to fetch message %s: %s", request_id, exception)
-                return
-            idx = int(request_id)
-            payload = response.get("payload", {})
-            headers = payload.get("headers", [])
-            items[idx] = {
-                "id": response.get("id"),
-                "from": _get_header(headers, "From", "Inconnu"),
-                "subject": _get_header(headers, "Subject", "(sans sujet)"),
-                "date": _get_header(headers, "Date", ""),
-                "snippet": response.get("snippet", ""),
-            }
+            return self._fetch_emails(mail, recent_ids)
+        except Exception as e:
+            logger.error("Failed to fetch promo emails: %s", e)
+            return []
 
-        batch = service.new_batch_http_request(callback=_on_message)
-        for i, message in enumerate(messages):
-            batch.add(
-                service.users().messages().get(
-                    userId="me",
-                    id=message["id"],
-                    format="metadata",
-                    metadataHeaders=["From", "Subject", "Date"],
-                ),
-                request_id=str(i),
-            )
-        batch.execute()
+    def get_recent_emails(self, session_id: Optional[str], max_results: int = 10) -> list:
+        if not session_id or session_id not in self._sessions:
+            return []
 
-        result = [item for item in items if item is not None]
-        logger.info("Built %s Gmail message payloads", len(result))
-        return result
+        mail = self._sessions[session_id]
+        try:
+            mail.select("INBOX")
+            _, data = mail.search(None, "ALL")
+            ids = data[0].split()
+            recent_ids = ids[-max_results:][::-1]
+            return self._fetch_emails(mail, recent_ids)
+        except Exception as e:
+            logger.error("Failed to fetch emails: %s", e)
+            return []
 
-    def clear_session(self, session_id: str | None) -> None:
-        if session_id:
-            logger.info("Clearing Gmail session %s", session_id)
-            self._credentials_store.pop(session_id, None)
+    def _fetch_emails(self, mail, msg_ids: list) -> list:
+        emails = []
+        for msg_id in msg_ids:
+            try:
+                _, msg_data = mail.fetch(msg_id, "(RFC822)")
+                raw = msg_data[0][1]
+                msg = email.message_from_bytes(raw)
+
+                subject = _decode_str(msg.get("Subject", "(sans sujet)"))
+                sender = _decode_str(msg.get("From", "Inconnu"))
+                date = msg.get("Date", "")
+                snippet = self._get_snippet(msg)
+                unsubscribe_url, unsubscribe_email = _extract_unsubscribe(
+                    msg.get("List-Unsubscribe", "")
+                )
+                message_id = msg.get("Message-ID", "").strip("<>")
+
+                emails.append({
+                    "id": msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id),
+                    "from": sender,
+                    "subject": subject,
+                    "date": date,
+                    "snippet": snippet,
+                    "unsubscribe_url": unsubscribe_url,
+                    "unsubscribe_email": unsubscribe_email,
+                    "message_id": message_id,
+                })
+            except Exception as e:
+                logger.error("Failed to parse message %s: %s", msg_id, e)
+        return emails
+
+    def _get_snippet(self, msg) -> str:
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                ctype = part.get_content_type()
+                if ctype == "text/plain" and not part.get("Content-Disposition"):
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        body = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                        break
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                body = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+        return body[:500].replace("\n", " ").replace("\r", "").strip()
