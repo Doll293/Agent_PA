@@ -31,6 +31,8 @@ class Settings:
         self.mail_max_results = int(os.getenv("MAIL_MAX_RESULTS", "10"))
         self.debug = os.getenv("DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
         self.transformers_model = os.getenv("TRANSFORMERS_MODEL", "joeddav/xlm-roberta-large-xnli")
+        self.groq_api_key = os.getenv("GROQ_API_KEY", "")
+        self.groq_model = os.getenv("GROQ_MODEL", "llama3-8b-8192")
 
 
 settings = Settings()
