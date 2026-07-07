@@ -1,7 +1,8 @@
 import logging
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlencode
+from typing import Optional
 
 import streamlit as st
 
@@ -15,234 +16,321 @@ from mail_manager.config import settings
 from mail_manager.gmail_client import GmailClient
 from mail_manager.workflow import Workflow
 
-
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-gmail_client = GmailClient()
-workflow = Workflow()
+if "gmail_client" not in st.session_state:
+    st.session_state["gmail_client"] = GmailClient()
+if "workflow" not in st.session_state:
+    st.session_state["workflow"] = Workflow()
+
+gmail_client = st.session_state["gmail_client"]
+workflow = st.session_state["workflow"]
 
 
-def _sync_credentials_from_session(session_id: str) -> None:
-    raw_credentials = st.session_state.get("gmail_credentials")
-    gmail_client.restore_credentials(session_id, raw_credentials)
+def _render_login_form() -> None:
+    st.markdown("### Connexion à votre boîte Gmail")
+    st.info("Entrez votre adresse Gmail et un mot de passe d'application pour accéder à vos emails.")
 
+    with st.expander("Comment obtenir un mot de passe d'application ?"):
+        st.markdown("""
+1. Allez sur [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+2. Activez la **validation en 2 étapes** si ce n'est pas fait
+3. Créez un mot de passe → nom : `Mail Manager`
+4. Copiez le code à **16 caractères**
+        """)
 
-def _get_session_id() -> str:
-    session_id = st.session_state.get("gmail_session_id")
-    if not session_id:
-        session_id = gmail_client.create_session_id()
-        st.session_state["gmail_session_id"] = session_id
-    return session_id
+    with st.form("login_form"):
+        email_input = st.text_input("Adresse Gmail", placeholder="exemple@gmail.com")
+        password_input = st.text_input("Mot de passe d'application", type="password", placeholder="xxxx xxxx xxxx xxxx")
+        submitted = st.form_submit_button("Se connecter", use_container_width=True)
 
-
-def _get_callback_url() -> str:
-    params = st.query_params
-    if not params:
-        return settings.streamlit_redirect_uri
-
-    raw_params = {}
-    for key, value in params.items():
-        if isinstance(value, list):
-            raw_params[key] = value[-1]
+    if submitted:
+        if not email_input or not password_input:
+            st.error("Veuillez remplir les deux champs.")
+            return
+        clean_password = password_input.replace(" ", "")
+        with st.spinner("Connexion en cours..."):
+            session_id = gmail_client.connect(email_input, clean_password)
+        if session_id:
+            st.session_state["session_id"] = session_id
+            st.session_state["gmail_email"] = email_input
+            st.session_state["gmail_password"] = clean_password
+            st.rerun()
         else:
-            raw_params[key] = value
-    return f"{settings.streamlit_redirect_uri}?{urlencode(raw_params)}"
+            st.error("Connexion échouée. Vérifiez votre email et votre mot de passe d'application.")
 
 
-def _clear_query_params() -> None:
-    st.query_params.clear()
+def _ensure_connection() -> Optional[str]:
+    """Vérifie et rétablit la connexion IMAP si nécessaire."""
+    session_id = st.session_state.get("session_id")
+    if session_id and gmail_client.is_connected(session_id):
+        return session_id
+
+    email = st.session_state.get("gmail_email")
+    password = st.session_state.get("gmail_password")
+    if email and password:
+        logger.info("Reconnecting IMAP for %s", email)
+        new_session = gmail_client.connect(email, password)
+        if new_session:
+            st.session_state["session_id"] = new_session
+            return new_session
+
+    return None
 
 
-def _handle_oauth_callback(session_id: str) -> None:
-    if "code" not in st.query_params or "state" not in st.query_params:
-        return
-
-    returned_state = st.query_params.get("state")
-    if isinstance(returned_state, list):
-        returned_state = returned_state[-1]
-    if not returned_state:
-        st.session_state["last_error"] = "Etat OAuth Gmail introuvable."
-        logger.error("OAuth callback received without state parameter.")
-        _clear_query_params()
-        return
-
-    # Streamlit peut recreer une session au retour de Google.
-    # On reutilise donc le state OAuth comme identifiant de session stable.
-    st.session_state["gmail_oauth_state"] = returned_state
-    st.session_state["gmail_session_id"] = returned_state
-
-    try:
-        gmail_client.fetch_token_from_callback(
-            state=returned_state,
-            full_callback_url=_get_callback_url(),
-            session_id=returned_state,
-            redirect_uri=settings.streamlit_redirect_uri,
-        )
-        st.session_state["gmail_credentials"] = gmail_client.serialize_credentials(returned_state)
-        logger.info("Gmail OAuth callback completed successfully.")
-    except Exception as exc:
-        logger.exception("Gmail OAuth callback failed.")
-        st.session_state["last_error"] = str(exc)
-    finally:
-        st.session_state.pop("gmail_oauth_state", None)
-        _clear_query_params()
-        st.rerun()
+def _load_emails(session_id: str, mail_limit: int) -> list:
+    emails = gmail_client.get_recent_emails(session_id, max_results=mail_limit)
+    processed = []
+    progress = st.progress(0, text="Analyse IA en cours...")
+    for i, em in enumerate(emails):
+        processed.extend(workflow.run_for_batch([em]))
+        progress.progress((i + 1) / len(emails), text=f"Analyse mail {i + 1} / {len(emails)}")
+    progress.empty()
+    return processed
 
 
-def _render_email_card(email: dict[str, str]) -> None:
+def _parse_date(email: dict) -> datetime:
+    raw = email.get("date", "")
+    for fmt in ["%a, %d %b %Y %H:%M:%S %z", "%d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z"]:
+        try:
+            return datetime.strptime(raw[:31].strip(), fmt)
+        except Exception:
+            continue
+    return datetime.now()
+
+
+def _render_promo_card(email: dict) -> None:
+    company = email.get("company") or email.get("from", "Inconnu")
+    summary = email.get("summary", "")
+    promo_code = email.get("promo_code", "")
+    expiry = email.get("expiry_date", "")
+    discount = email.get("discount", "")
+    category = email.get("category", "")
+    is_fake = email.get("is_fake_promo", False)
+    unsubscribe_url = email.get("unsubscribe_url", "")
+    message_id = email.get("message_id", "")
+
     with st.container(border=True):
-        st.markdown(f"**{email['from']}**")
-        st.caption(email["date"])
-        st.subheader(email["subject"])
-        st.write(email["snippet"])
-        st.write(f"Categorie : **{email['category']}**")
-        st.write(f"Suggestion : **{email['suggestion']}**")
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns([3, 1])
         with col1:
-            st.caption("Sujet envoye au traitement")
-            st.write(email["anonymized_subject"])
+            st.markdown(f"**{company}**")
+            st.caption(f"{category}  •  {email.get('date', '')[:16]}")
         with col2:
-            st.caption("Extrait envoye au traitement")
-            st.write(email["anonymized_snippet"])
+            if discount:
+                st.markdown(f"### {discount}")
+
+        st.write(summary or email.get("subject", ""))
+
+        info_cols = st.columns(2)
+        with info_cols[0]:
+            if promo_code:
+                st.success(f"Code : `{promo_code}`")
+        with info_cols[1]:
+            if expiry:
+                st.info(f"Expire : {expiry}")
+
+        if is_fake:
+            st.warning("Promo permanente ou trompeuse")
+
+        # Boutons d'action
+        action_cols = st.columns(2)
+        with action_cols[0]:
+            if message_id:
+                gmail_url = f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{message_id}"
+                st.link_button("Voir dans Gmail", gmail_url, use_container_width=True)
+        with action_cols[1]:
+            if unsubscribe_url:
+                st.link_button("Se désabonner", unsubscribe_url, use_container_width=True, type="secondary")
 
 
-def _filter_emails(emails: list[dict[str, str]], selected_category: str, search_text: str) -> list[dict[str, str]]:
-    filtered = emails
+def _render_fiche(promos: list, period: str) -> None:
+    now = datetime.now()
 
-    if selected_category != "Toutes":
-        filtered = [email for email in filtered if email["category"] == selected_category]
+    if period == "Aujourd'hui":
+        filtered = [e for e in promos if _parse_date(e).date() == now.date()]
+        label = f"aujourd'hui ({now.strftime('%d/%m/%Y')})"
+    elif period == "Cette semaine":
+        start = now - timedelta(days=now.weekday())
+        filtered = [e for e in promos if _parse_date(e).date() >= start.date()]
+        label = f"cette semaine (depuis le {start.strftime('%d/%m/%Y')})"
+    else:
+        filtered = [e for e in promos if _parse_date(e).month == now.month and _parse_date(e).year == now.year]
+        label = f"ce mois-ci ({now.strftime('%B %Y')})"
 
-    normalized_search = search_text.strip().lower()
-    if not normalized_search:
-        return filtered
+    st.markdown(f"### {len(filtered)} promo(s) reçue(s) {label}")
 
-    return [
-        email
-        for email in filtered
-        if normalized_search in email["from"].lower()
-        or normalized_search in email["subject"].lower()
-        or normalized_search in email["snippet"].lower()
-        or normalized_search in email["category"].lower()
-    ]
+    if not filtered:
+        st.info("Aucune promo sur cette période.")
+        return
+
+    # Tableau récapitulatif
+    rows = []
+    for e in filtered:
+        message_id = e.get("message_id", "")
+        gmail_url = f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{message_id}" if message_id else ""
+        rows.append({
+            "Entreprise": e.get("company") or e.get("from", ""),
+            "Promo": e.get("summary") or e.get("subject", ""),
+            "Réduction": e.get("discount", ""),
+            "Code promo": e.get("promo_code", ""),
+            "Expire le": e.get("expiry_date", ""),
+            "Catégorie": e.get("category", ""),
+            "Ouvrir": gmail_url,
+            "Se désabonner": e.get("unsubscribe_url", ""),
+        })
+
+    st.dataframe(
+        rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Ouvrir": st.column_config.LinkColumn("Ouvrir", display_text="📧 Voir"),
+            "Se désabonner": st.column_config.LinkColumn("Se désabonner", display_text="🚫 Stop"),
+        }
+    )
+
+    st.markdown("---")
+    st.markdown("#### Détail des promos")
+    for e in filtered:
+        _render_promo_card(e)
 
 
 def main() -> None:
-    st.set_page_config(page_title="Mail Manager", layout="centered")
-    st.title("Mail Manager")
-    st.write(
-        "Prototype simple avec Gmail en lecture seule, anonymisation avant traitement "
-        "et classification 100% IA."
-    )
+    st.set_page_config(page_title="Mail Manager — Promos", layout="wide")
+    st.title("Mail Manager — Promos")
 
-    session_id = _get_session_id()
-    _sync_credentials_from_session(session_id)
-    _handle_oauth_callback(session_id)
-    session_id = _get_session_id()
-    _sync_credentials_from_session(session_id)
+    session_id = _ensure_connection()
 
-    error_message = st.session_state.pop("last_error", None)
-    configuration_error = gmail_client.get_configuration_error()
-
-    if configuration_error:
-        logger.warning("Application misconfigured: %s", configuration_error)
-        st.warning(configuration_error)
+    if not session_id:
+        _render_login_form()
         return
 
-    if not gmail_client.is_connected(session_id):
-        st.info("Connexion Gmail requise pour lire les 10 derniers messages.")
-        auth_url, state = gmail_client.build_auth_url(redirect_uri=settings.streamlit_redirect_uri)
-        st.session_state["gmail_oauth_state"] = state
-        st.session_state["gmail_session_id"] = state
-        st.link_button("Se connecter avec Gmail", auth_url, use_container_width=True)
-        with st.expander("Debug OAuth"):
-            st.code(settings.streamlit_redirect_uri)
-            st.caption("Cette valeur doit etre strictement identique dans Google Cloud > Authorized redirect URIs.")
-        if error_message:
-            logger.error("Stored UI error before login: %s", error_message)
-            st.error(error_message)
-        return
-
-    col1, col2 = st.columns([3, 1])
+    # Barre du haut
+    col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
-        st.success("Connexion Gmail active pour cette session.")
+        st.success(f"Connecté : {session_id}")
     with col2:
-        if st.button("Deconnecter", use_container_width=True):
+        mail_limit = st.selectbox("Nb de mails", [20, 50, 100, 200], index=1, label_visibility="collapsed")
+    with col3:
+        if st.button("Déconnecter", use_container_width=True):
             gmail_client.clear_session(session_id)
-            st.session_state.pop("gmail_credentials", None)
-            st.session_state.pop("gmail_oauth_state", None)
+            st.session_state.pop("session_id", None)
+            st.session_state.pop("gmail_email", None)
+            st.session_state.pop("gmail_password", None)
+            st.session_state.pop("processed_emails", None)
             st.rerun()
 
-    action_col1, action_col2 = st.columns([2, 2])
-    with action_col1:
-        if st.button("Actualiser les mails", use_container_width=True):
-            st.rerun()
-    with action_col2:
-        st.caption(f"{settings.mail_max_results} derniers mails lus au maximum")
-        st.caption(f"Modele IA : {settings.transformers_model}")
+    preferences = st.text_input(
+        "Vos centres d'intérêt (facultatif)",
+        placeholder="ex: tech, voyages, mode femme...",
+        key="preferences"
+    )
+    workflow.preferences = preferences
 
-    if error_message:
-        logger.error("Stored UI error after login: %s", error_message)
-        st.error(error_message)
+    # Cache global d'analyses par message_id (persiste entre chargements)
+    if "analysis_cache" not in st.session_state:
+        st.session_state["analysis_cache"] = {}
+    analysis_cache = st.session_state["analysis_cache"]
 
-    with st.status("Chargement des mails...", expanded=False) as status:
-        try:
-            status.update(label="Lecture Gmail en cours...")
-            mail_limit = st.session_state.get("mail_limit", settings.mail_max_results)
-            emails = gmail_client.get_recent_emails(session_id, max_results=mail_limit)
-        except Exception as exc:
-            logger.exception("Gmail mail retrieval failed.")
-            status.update(label="Erreur lors de la lecture.", state="error")
-            st.error(str(exc))
-            return
+    # Chargement ou récupération depuis session
+    cache_key = f"emails_{session_id}_{mail_limit}"
+    force_reload = st.button("Charger / Actualiser les mails promos", use_container_width=True)
 
-        if not emails:
-            logger.info("No emails returned from Gmail API.")
-            status.update(label="Aucun mail trouve.", state="complete")
-            st.info(f"Aucun email trouve dans les {settings.mail_max_results} derniers messages.")
-            return
+    if force_reload or cache_key not in st.session_state:
+        with st.status("Chargement et analyse des mails promos...", expanded=True) as status:
+            try:
+                status.update(label="Lecture de l'onglet Promotions de Gmail...")
+                emails = gmail_client.get_promo_emails(session_id, max_results=mail_limit)
+                if not emails:
+                    status.update(label="Aucun mail trouvé.", state="complete")
+                    st.info("Aucun email trouvé dans l'onglet Promotions.")
+                    return
 
-        logger.info("Retrieved %s emails from Gmail API.", len(emails))
-        status.update(label=f"Classification de {len(emails)} mails...")
-        try:
-            processed_emails = []
-            progress = st.progress(0, text="Classification IA en cours...")
-            for i, email in enumerate(emails):
-                processed_emails.extend(workflow.run_for_batch([email]))
-                progress.progress((i + 1) / len(emails), text=f"Mail {i + 1} / {len(emails)}")
-            progress.empty()
-        except Exception as exc:
-            logger.exception("AI mail classification failed.")
-            status.update(label="Erreur de classification IA.", state="error")
-            st.error(str(exc))
-            return
-        status.update(label=f"{len(emails)} mails charges.", state="complete")
-    available_categories = ["Toutes"] + sorted({email["category"] for email in processed_emails})
+                # Séparation cache / à analyser
+                to_analyze = []
+                processed = []
+                for em in emails:
+                    mid = em.get("message_id", "")
+                    if mid and mid in analysis_cache:
+                        processed.append({**em, **analysis_cache[mid]})
+                    else:
+                        to_analyze.append(em)
 
-    st.subheader("Filtres")
-    filter_col1, filter_col2 = st.columns([1, 2])
-    with filter_col1:
-        selected_category = st.selectbox("Categorie", available_categories, index=0)
-    with filter_col2:
-        search_text = st.text_input("Recherche", placeholder="expediteur, sujet, extrait...")
+                cached_count = len(processed)
+                if cached_count:
+                    status.update(label=f"{cached_count} mails déjà en cache — analyse de {len(to_analyze)} nouveaux...")
+                else:
+                    status.update(label=f"{len(emails)} mails à analyser...")
 
-    filtered_emails = _filter_emails(processed_emails, selected_category, search_text)
-    st.caption(f"{len(filtered_emails)} mail(s) affiche(s) sur {len(processed_emails)}")
+                # Batch de 8 mails par appel API
+                BATCH_SIZE = 8
+                progress = st.progress(0, text="Analyse IA en cours...")
+                total = len(to_analyze)
+                for batch_start in range(0, total, BATCH_SIZE):
+                    batch = to_analyze[batch_start:batch_start + BATCH_SIZE]
+                    analyzed_batch = workflow.run_for_batch(batch)
+                    for em, an in zip(batch, analyzed_batch):
+                        mid = em.get("message_id", "")
+                        if mid:
+                            analysis_cache[mid] = {k: v for k, v in an.items() if k not in em}
+                        processed.append(an)
+                    done = min(batch_start + BATCH_SIZE, total)
+                    progress.progress(done / total if total else 1.0,
+                                      text=f"Analyse {done} / {total}")
+                progress.empty()
 
-    if not filtered_emails:
-        st.info("Aucun mail ne correspond au filtre actuel.")
+                st.session_state[cache_key] = processed
+                status.update(
+                    label=f"{len(processed)} mails traités ({cached_count} depuis cache, {len(to_analyze)} analysés).",
+                    state="complete"
+                )
+            except Exception as exc:
+                logger.exception("Erreur chargement mails.")
+                status.update(label="Erreur.", state="error")
+                st.error(str(exc))
+                return
+
+    processed = st.session_state.get(cache_key, [])
+    if not processed:
+        st.info("Cliquez sur 'Charger / Actualiser les mails' pour démarrer.")
         return
 
-    for email in filtered_emails:
-        _render_email_card(email)
+    promos = [e for e in processed if e.get("is_promo")]
 
-    if len(emails) == mail_limit:
-        if st.button("Voir plus", use_container_width=True):
-            st.session_state["mail_limit"] = mail_limit + settings.mail_max_results
+    top_cols = st.columns([2, 1, 1])
+    with top_cols[0]:
+        st.caption(f"{len(promos)} promo(s) sur {len(processed)} mails — cache : {len(analysis_cache)}")
+    with top_cols[1]:
+        if st.button("Vider cache IA", use_container_width=True):
+            st.session_state["analysis_cache"] = {}
+            for key in list(st.session_state.keys()):
+                if key.startswith("emails_"):
+                    del st.session_state[key]
             st.rerun()
+    with top_cols[2]:
+        st.page_link("pages/1_Chat_Promos.py", label="💬 Ouvrir le chat", use_container_width=True)
+
+    if not promos:
+        st.info("Aucune promo détectée parmi les mails chargés.")
+        return
+
+    tab1, tab2 = st.tabs(["Fiche Promos", "Par catégorie"])
+
+    with tab1:
+        period = st.radio("Période", ["Aujourd'hui", "Cette semaine", "Ce mois"], horizontal=True)
+        _render_fiche(promos, period)
+
+    with tab2:
+        cats = sorted({e.get("category", "autre") for e in promos})
+        selected = st.selectbox("Catégorie", cats)
+        cat_promos = [e for e in promos if e.get("category") == selected]
+        st.caption(f"{len(cat_promos)} promo(s) dans '{selected}'")
+        for e in cat_promos:
+            _render_promo_card(e)
 
 
 if __name__ == "__main__":
