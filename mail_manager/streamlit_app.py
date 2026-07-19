@@ -254,7 +254,7 @@ def main() -> None:
 
                 # Batch de 8 mails par appel : le workflow interroge Azure pour
                 # ne réanalyser que les mails absents du cache Blob Storage.
-                BATCH_SIZE = 8
+                BATCH_SIZE = 4
                 processed = []
                 progress = st.progress(0, text="Traitement en cours...")
                 total = len(emails)
