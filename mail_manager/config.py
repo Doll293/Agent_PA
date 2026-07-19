@@ -29,10 +29,17 @@ class Settings:
         self.session_secret = os.getenv("SESSION_SECRET", "change-me")
         self.mail_preview_length = int(os.getenv("MAIL_PREVIEW_LENGTH", "220"))
         self.mail_max_results = int(os.getenv("MAIL_MAX_RESULTS", "10"))
+        self.mail_retention_days = int(os.getenv("MAIL_RETENTION_DAYS", "30"))
         self.debug = os.getenv("DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
-        self.transformers_model = os.getenv("TRANSFORMERS_MODEL", "joeddav/xlm-roberta-large-xnli")
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
         self.groq_model = os.getenv("GROQ_MODEL", "llama3-8b-8192")
+        self.gmail_email = os.getenv("GMAIL_EMAIL", "")
+        self.gmail_app_password = os.getenv("GMAIL_APP_PASSWORD", "")
+        self.whatsapp_phone = os.getenv("WHATSAPP_PHONE", "")
+        self.callmebot_api_key = os.getenv("CALLMEBOT_API_KEY", "")
+        self.azure_storage_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
+        self.azure_storage_container = os.getenv("AZURE_STORAGE_CONTAINER", "mails-anonymized")
+        self.azure_storage_enabled = os.getenv("AZURE_STORAGE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

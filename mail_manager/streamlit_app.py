@@ -210,12 +210,12 @@ def main() -> None:
         return
 
     # Barre du haut
-    col1, col2, col3 = st.columns([3, 1, 1])
+    col1, col2 = st.columns([4, 1])
     with col1:
-        st.success(f"Connecté : {session_id}")
+        st.success(
+            f"Connecté : {session_id} — fenêtre glissante de {settings.mail_retention_days} jours"
+        )
     with col2:
-        mail_limit = st.selectbox("Nb de mails", [20, 50, 100, 200], index=1, label_visibility="collapsed")
-    with col3:
         if st.button("Déconnecter", use_container_width=True):
             gmail_client.clear_session(session_id)
             st.session_state.pop("session_id", None)
@@ -230,62 +230,45 @@ def main() -> None:
         key="preferences"
     )
     workflow.preferences = preferences
-
-    # Cache global d'analyses par message_id (persiste entre chargements)
-    if "analysis_cache" not in st.session_state:
-        st.session_state["analysis_cache"] = {}
-    analysis_cache = st.session_state["analysis_cache"]
+    workflow.user_email = st.session_state.get("gmail_email", "")
 
     # Chargement ou récupération depuis session
-    cache_key = f"emails_{session_id}_{mail_limit}"
-    force_reload = st.button("Charger / Actualiser les mails promos", use_container_width=True)
+    retention_days = settings.mail_retention_days
+    cache_key = f"emails_{session_id}_{retention_days}d"
+    force_reload = st.button(
+        f"Charger / Actualiser les {retention_days} derniers jours",
+        use_container_width=True,
+    )
 
     if force_reload or cache_key not in st.session_state:
         with st.status("Chargement et analyse des mails promos...", expanded=True) as status:
             try:
-                status.update(label="Lecture de l'onglet Promotions de Gmail...")
-                emails = gmail_client.get_promo_emails(session_id, max_results=mail_limit)
+                status.update(label=f"Lecture des {retention_days} derniers jours de Promotions...")
+                emails = gmail_client.get_promo_emails(session_id, days=retention_days)
                 if not emails:
                     status.update(label="Aucun mail trouvé.", state="complete")
                     st.info("Aucun email trouvé dans l'onglet Promotions.")
                     return
 
-                # Séparation cache / à analyser
-                to_analyze = []
-                processed = []
-                for em in emails:
-                    mid = em.get("message_id", "")
-                    if mid and mid in analysis_cache:
-                        processed.append({**em, **analysis_cache[mid]})
-                    else:
-                        to_analyze.append(em)
+                status.update(label=f"{len(emails)} mails à traiter (déduplication via Azure)...")
 
-                cached_count = len(processed)
-                if cached_count:
-                    status.update(label=f"{cached_count} mails déjà en cache — analyse de {len(to_analyze)} nouveaux...")
-                else:
-                    status.update(label=f"{len(emails)} mails à analyser...")
-
-                # Batch de 8 mails par appel API
+                # Batch de 8 mails par appel : le workflow interroge Azure pour
+                # ne réanalyser que les mails absents du cache Blob Storage.
                 BATCH_SIZE = 8
-                progress = st.progress(0, text="Analyse IA en cours...")
-                total = len(to_analyze)
+                processed = []
+                progress = st.progress(0, text="Traitement en cours...")
+                total = len(emails)
                 for batch_start in range(0, total, BATCH_SIZE):
-                    batch = to_analyze[batch_start:batch_start + BATCH_SIZE]
-                    analyzed_batch = workflow.run_for_batch(batch)
-                    for em, an in zip(batch, analyzed_batch):
-                        mid = em.get("message_id", "")
-                        if mid:
-                            analysis_cache[mid] = {k: v for k, v in an.items() if k not in em}
-                        processed.append(an)
+                    batch = emails[batch_start:batch_start + BATCH_SIZE]
+                    processed.extend(workflow.run_for_batch(batch))
                     done = min(batch_start + BATCH_SIZE, total)
                     progress.progress(done / total if total else 1.0,
-                                      text=f"Analyse {done} / {total}")
+                                      text=f"Traitement {done} / {total}")
                 progress.empty()
 
                 st.session_state[cache_key] = processed
                 status.update(
-                    label=f"{len(processed)} mails traités ({cached_count} depuis cache, {len(to_analyze)} analysés).",
+                    label=f"{len(processed)} mails traités.",
                     state="complete"
                 )
             except Exception as exc:
@@ -301,21 +284,39 @@ def main() -> None:
 
     promos = [e for e in processed if e.get("is_promo")]
 
-    top_cols = st.columns([2, 1, 1])
+    top_cols = st.columns([3, 1])
     with top_cols[0]:
-        st.caption(f"{len(promos)} promo(s) sur {len(processed)} mails — cache : {len(analysis_cache)}")
+        st.caption(f"{len(promos)} promo(s) sur {len(processed)} mails")
     with top_cols[1]:
-        if st.button("Vider cache IA", use_container_width=True):
-            st.session_state["analysis_cache"] = {}
-            for key in list(st.session_state.keys()):
-                if key.startswith("emails_"):
-                    del st.session_state[key]
-            st.rerun()
-    with top_cols[2]:
-        st.page_link("pages/1_Chat_Promos.py", label="💬 Ouvrir le chat", use_container_width=True)
+        st.page_link("pages/1_Chat_Promos.py", label="💬 Chat", use_container_width=True)
 
     if not promos:
         st.info("Aucune promo détectée parmi les mails chargés.")
+        return
+
+    # Filtre par plage de dates (sur received_date au format YYYY-MM-DD)
+    dated = [(p, p.get("received_date", "")) for p in promos]
+    known_dates = sorted({d for _, d in dated if d})
+    if known_dates:
+        min_date = datetime.strptime(known_dates[0], "%Y-%m-%d").date()
+        max_date = datetime.strptime(known_dates[-1], "%Y-%m-%d").date()
+        selected_range = st.date_input(
+            "Filtrer par plage de dates",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            format="YYYY-MM-DD",
+        )
+        if isinstance(selected_range, tuple) and len(selected_range) == 2:
+            start, end = selected_range
+            promos = [
+                p for p, d in dated
+                if d and start.isoformat() <= d <= end.isoformat()
+            ]
+            st.caption(f"{len(promos)} promo(s) entre {start} et {end}")
+
+    if not promos:
+        st.info("Aucune promo dans la plage de dates sélectionnée.")
         return
 
     tab1, tab2 = st.tabs(["Fiche Promos", "Par catégorie"])

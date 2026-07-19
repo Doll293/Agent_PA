@@ -1,11 +1,28 @@
 import imaplib
 import email
 import re
+from datetime import datetime, timezone
 from email.header import decode_header
+from email.utils import parsedate_to_datetime
 from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_received_date(raw_date: str) -> str:
+    """Retourne la date du mail au format YYYY-MM-DD, ou '' si illisible."""
+    if not raw_date:
+        return ""
+    try:
+        dt = parsedate_to_datetime(raw_date)
+        if dt is None:
+            return ""
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return ""
 
 
 def _decode_str(value: str) -> str:
@@ -76,24 +93,23 @@ class GmailClient:
                 pass
             del self._sessions[session_id]
 
-    def get_promo_emails(self, session_id: Optional[str], max_results: int = 30) -> list:
-        """Recupere uniquement les mails de l'onglet Promotions de Gmail via X-GM-RAW."""
+    def get_promo_emails(self, session_id: Optional[str], days: int = 30) -> list:
+        """Recupere les mails de l'onglet Promotions des `days` derniers jours."""
         if not session_id or session_id not in self._sessions:
             return []
 
         mail = self._sessions[session_id]
         try:
             mail.select("INBOX")
-            typ, data = mail.search(None, 'X-GM-RAW', '"category:promotions"')
+            query = f'"category:promotions newer_than:{days}d"'
+            typ, data = mail.search(None, 'X-GM-RAW', query)
             if typ != "OK":
                 logger.warning("X-GM-RAW search failed, fallback to ALL")
                 _, data = mail.search(None, "ALL")
 
             ids = data[0].split()
-            recent_ids = ids[-max_results:][::-1]
-            logger.info("Found %s promotion emails (fetching last %s)", len(ids), len(recent_ids))
-
-            return self._fetch_emails(mail, recent_ids)
+            logger.info("Found %s promotion emails on last %s days", len(ids), days)
+            return self._fetch_emails(mail, ids[::-1])
         except Exception as e:
             logger.error("Failed to fetch promo emails: %s", e)
             return []
@@ -135,6 +151,7 @@ class GmailClient:
                     "from": sender,
                     "subject": subject,
                     "date": date,
+                    "received_date": _parse_received_date(date),
                     "snippet": snippet,
                     "unsubscribe_url": unsubscribe_url,
                     "unsubscribe_email": unsubscribe_email,
