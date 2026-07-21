@@ -107,12 +107,12 @@ def _load_emails(session_id: str, mail_limit: int) -> list:
 
 
 def _parse_date(email: dict) -> datetime:
-    raw = email.get("date", "")
-    for fmt in ["%a, %d %b %Y %H:%M:%S %z", "%d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z"]:
+    received = email.get("received_date", "")
+    if received:
         try:
-            return datetime.strptime(raw[:31].strip(), fmt)
-        except Exception:
-            continue
+            return datetime.strptime(received, "%Y-%m-%d")
+        except ValueError:
+            pass
     return datetime.now()
 
 

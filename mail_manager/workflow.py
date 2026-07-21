@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 
 from mail_manager.azure_storage import (
