@@ -34,10 +34,11 @@ class Workflow:
             "is_fake_promo": analysis.get("is_fake_promo", False),
         }
 
-    def run_for_batch(self, emails: list) -> list:
-        cached_index = (
-            list_cached_hashes(self.user_email) if settings.azure_storage_enabled else {}
-        )
+    def run_for_batch(self, emails: list, cached_index: dict | None = None) -> list:
+        if cached_index is None:
+            cached_index = (
+                list_cached_hashes(self.user_email) if settings.azure_storage_enabled else {}
+            )
 
         result: list = [None] * len(emails)
         to_analyze_positions = []

@@ -12,6 +12,7 @@ PROJECT_ROOT = CURRENT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from mail_manager.azure_storage import list_cached_hashes
 from mail_manager.config import settings
 from mail_manager.gmail_client import GmailClient
 from mail_manager.workflow import Workflow
@@ -20,6 +21,8 @@ logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+logging.getLogger("azure.storage").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 if "gmail_client" not in st.session_state:
@@ -269,15 +272,19 @@ def main() -> None:
 
                 status.update(label=f"{len(emails)} mails à traiter (déduplication via Azure)...")
 
-                # Batch de 8 mails par appel : le workflow interroge Azure pour
-                # ne réanalyser que les mails absents du cache Blob Storage.
+                cached_index = (
+                    list_cached_hashes(workflow.user_email)
+                    if settings.azure_storage_enabled
+                    else {}
+                )
+
                 BATCH_SIZE = 4
                 processed = []
                 progress = st.progress(0, text="Traitement en cours...")
                 total = len(emails)
                 for batch_start in range(0, total, BATCH_SIZE):
                     batch = emails[batch_start:batch_start + BATCH_SIZE]
-                    processed.extend(workflow.run_for_batch(batch))
+                    processed.extend(workflow.run_for_batch(batch, cached_index=cached_index))
                     done = min(batch_start + BATCH_SIZE, total)
                     progress.progress(done / total if total else 1.0,
                                       text=f"Traitement {done} / {total}")
