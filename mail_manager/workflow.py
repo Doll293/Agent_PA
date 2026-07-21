@@ -12,6 +12,16 @@ from mail_manager.processors import analyze_mails_batch
 
 logger = logging.getLogger(__name__)
 
+_DISPLAY_FIELDS = frozenset({
+    "message_id", "from", "date", "received_date", "subject", "unsubscribe_url",
+    "is_promo", "company", "category", "summary", "promo_code", "expiry_date",
+    "discount", "is_fake_promo",
+})
+
+
+def _trim_for_session(mail: dict) -> dict:
+    return {k: v for k, v in mail.items() if k in _DISPLAY_FIELDS}
+
 
 class Workflow:
     def __init__(self, preferences: str = "", user_email: str = ""):
@@ -96,4 +106,4 @@ class Workflow:
             except Exception:
                 logger.exception("Stockage Azure echoue.")
 
-        return result
+        return [_trim_for_session(m) if m else m for m in result]
