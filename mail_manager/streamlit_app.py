@@ -295,7 +295,7 @@ def main() -> None:
         return
 
     # Filtre par plage de dates (sur received_date au format YYYY-MM-DD)
-    dated = [(p, p.get("received_date", "")) for p in promos]
+    """ dated = [(p, p.get("received_date", "")) for p in promos]
     known_dates = sorted({d for _, d in dated if d})
     if known_dates:
         min_date = datetime.strptime(known_dates[0], "%Y-%m-%d").date()
@@ -317,7 +317,7 @@ def main() -> None:
 
     if not promos:
         st.info("Aucune promo dans la plage de dates sélectionnée.")
-        return
+        return """
 
     tab1, tab2 = st.tabs(["Fiche Promos", "Par catégorie"])
 
