@@ -12,12 +12,17 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from mail_manager.config import settings
+from mail_manager.ui_theme import hero_header, inject_global_css
 
 logger = logging.getLogger(__name__)
 
-st.set_page_config(page_title="Chat Promos", layout="wide")
-st.title("Chat avec l'assistant Promos")
-st.caption("Discutez avec l'IA pour explorer vos promos, obtenir des résumés et des recommandations.")
+st.set_page_config(page_title="Chat Promos", layout="wide", page_icon="💬")
+inject_global_css()
+hero_header(
+    "Assistant IA",
+    "Discutez avec l'IA pour explorer vos promos et obtenir des recommandations",
+    icon="💬",
+)
 
 
 def _get_promos_from_session() -> list:
@@ -138,41 +143,65 @@ if not promos:
     st.page_link("streamlit_app.py", label="← Retour à la page principale", icon="📧")
     st.stop()
 
-st.success(f"{len(promos)} promo(s) disponible(s) pour la conversation.")
+# Barre d'état + navigation
+status_cols = st.columns([3, 1, 1])
+with status_cols[0]:
+    st.markdown(
+        f"""
+        <div style='background:linear-gradient(135deg, rgba(99,102,241,0.15), rgba(236,72,153,0.10));
+                    border:1px solid rgba(99,102,241,0.3);
+                    border-radius:12px;padding:0.7rem 1rem;'>
+            <span style='color:#A5B4FC;font-weight:600;'>🤖 IA prête</span>
+            <span style='color:#CBD5E1;margin-left:0.5rem;'>{len(promos)} promo(s) chargée(s)</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with status_cols[1]:
+    st.page_link("streamlit_app.py", label="📧 Promos", use_container_width=True)
+with status_cols[2]:
+    st.page_link("pages/2_Statistiques.py", label="📊 Stats", use_container_width=True)
 
-with st.expander("Voir les promos que l'IA connaît"):
-    for p in promos:
-        st.markdown(f"- **{p.get('company') or p.get('from')}** — {p.get('summary') or p.get('subject')}")
+with st.expander(f"📋 Voir les {len(promos)} promos analysées par l'IA"):
+    for p in promos[:30]:
+        company = p.get('company') or p.get('from', 'Inconnu')
+        summary = p.get('summary') or p.get('subject', '')
+        st.markdown(f"- **{company}** — {summary}")
+    if len(promos) > 30:
+        st.caption(f"... et {len(promos) - 30} autres")
 
 # Historique de conversation
 if "chat_messages" not in st.session_state:
     st.session_state["chat_messages"] = []
 
 # Suggestions rapides
-st.markdown("#### Suggestions")
+st.markdown("#### 💡 Suggestions")
 sug_cols = st.columns(4)
 suggestions = [
-    "Résume-moi les meilleures promos",
-    "Quelles promos expirent bientôt ?",
-    "Quelles marques envoient trop d'emails ?",
-    "Y a-t-il des promos tech ?",
+    ("✨", "Résume-moi les meilleures promos"),
+    ("⏰", "Quelles promos expirent bientôt ?"),
+    ("📮", "Quelles marques envoient trop d'emails ?"),
+    ("💻", "Y a-t-il des promos tech ?"),
 ]
-for i, sug in enumerate(suggestions):
+for i, (icon, sug) in enumerate(suggestions):
     with sug_cols[i]:
-        if st.button(sug, use_container_width=True, key=f"sug_{i}"):
+        if st.button(f"{icon}  {sug}", use_container_width=True, key=f"sug_{i}"):
             st.session_state["_pending_message"] = sug
 
 # Bouton reset
 if st.session_state["chat_messages"]:
-    if st.button("Nouvelle conversation", type="secondary"):
-        st.session_state["chat_messages"] = []
-        st.rerun()
+    reset_cols = st.columns([3, 1])
+    with reset_cols[1]:
+        if st.button("🗑️ Nouvelle conversation", type="secondary", use_container_width=True):
+            st.session_state["chat_messages"] = []
+            st.rerun()
 
 st.markdown("---")
 
 # Affichage historique
 for msg in st.session_state["chat_messages"]:
-    with st.chat_message(msg["role"]):
+    avatar = "🧑" if msg["role"] == "user" else "🤖"
+    with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
 
 # Message en attente depuis une suggestion
@@ -185,10 +214,10 @@ message_to_send = pending or user_input
 
 if message_to_send:
     st.session_state["chat_messages"].append({"role": "user", "content": message_to_send})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar="🧑"):
         st.markdown(message_to_send)
 
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar="🤖"):
         with st.spinner("L'assistant réfléchit..."):
             promos_context, links_map = _build_promos_context(promos)
             raw_response = _ask_groq(st.session_state["chat_messages"], promos_context)

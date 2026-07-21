@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from mail_manager.config import settings
 from mail_manager.gmail_client import GmailClient
+from mail_manager.ui_theme import hero_header, inject_global_css
 from mail_manager.workflow import Workflow
 
 logging.basicConfig(
@@ -32,21 +33,31 @@ workflow = st.session_state["workflow"]
 
 
 def _render_login_form() -> None:
-    st.markdown("### Connexion à votre boîte Gmail")
-    st.info("Entrez votre adresse Gmail et un mot de passe d'application pour accéder à vos emails.")
+    _, col_c, _ = st.columns([1, 2, 1])
+    with col_c:
+        st.markdown(
+            """
+            <div style='text-align:center;padding:1rem 0 2rem 0;'>
+                <div style='font-size:3.5rem;'>📬</div>
+                <h2 style='margin-top:0.5rem;'>Bienvenue</h2>
+                <p style='color:#94A3B8;'>Connectez votre boîte Gmail pour laisser l'IA trier vos promos</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    with st.expander("Comment obtenir un mot de passe d'application ?"):
-        st.markdown("""
+        with st.expander("Comment obtenir un mot de passe d'application ?"):
+            st.markdown("""
 1. Allez sur [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
 2. Activez la **validation en 2 étapes** si ce n'est pas fait
 3. Créez un mot de passe → nom : `Mail Manager`
 4. Copiez le code à **16 caractères**
-        """)
+            """)
 
-    with st.form("login_form"):
-        email_input = st.text_input("Adresse Gmail", placeholder="exemple@gmail.com")
-        password_input = st.text_input("Mot de passe d'application", type="password", placeholder="xxxx xxxx xxxx xxxx")
-        submitted = st.form_submit_button("Se connecter", use_container_width=True)
+        with st.form("login_form"):
+            email_input = st.text_input("Adresse Gmail", placeholder="exemple@gmail.com")
+            password_input = st.text_input("Mot de passe d'application", type="password", placeholder="xxxx xxxx xxxx xxxx")
+            submitted = st.form_submit_button("Se connecter", use_container_width=True)
 
     if submitted:
         if not email_input or not password_input:
@@ -200,8 +211,13 @@ def _render_fiche(promos: list, period: str) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Mail Manager — Promos", layout="wide")
-    st.title("Mail Manager — Promos")
+    st.set_page_config(page_title="Mail Manager — Promos", layout="wide", page_icon="📧")
+    inject_global_css()
+    hero_header(
+        "Mail Manager",
+        "Détection intelligente de vos promotions par IA",
+        icon="📬",
+    )
 
     session_id = _ensure_connection()
 
@@ -210,13 +226,26 @@ def main() -> None:
         return
 
     # Barre du haut
-    col1, col2 = st.columns([4, 1])
+    col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
-        st.success(
-            f"Connecté : {session_id} — fenêtre glissante de {settings.mail_retention_days} jours"
+        st.markdown(
+            f"""
+            <div style='background:linear-gradient(135deg, rgba(16,185,129,0.15), rgba(99,102,241,0.10));
+                        border:1px solid rgba(16,185,129,0.3);
+                        border-radius:12px;padding:0.7rem 1rem;'>
+                <span style='color:#10B981;font-weight:600;'>● Connecté</span>
+                <span style='color:#CBD5E1;margin-left:0.5rem;'>{st.session_state.get('gmail_email', session_id)}</span>
+                <span style='color:#94A3B8;margin-left:0.5rem;font-size:0.85rem;'>
+                    · fenêtre {settings.mail_retention_days} jours
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
     with col2:
-        if st.button("Déconnecter", use_container_width=True):
+        st.page_link("pages/2_Statistiques.py", label="📊 Stats", use_container_width=True)
+    with col3:
+        if st.button("Déconnecter", use_container_width=True, type="secondary"):
             gmail_client.clear_session(session_id)
             st.session_state.pop("session_id", None)
             st.session_state.pop("gmail_email", None)
@@ -252,7 +281,10 @@ def main() -> None:
 
                 status.update(label=f"{len(emails)} mails à traiter (déduplication via Azure)...")
 
-                # Batch de 8 mails par appel : le workflow interroge Azure pour
+                # Charger l'index Azure une seule fois pour toute la session de traitement
+                workflow.load_cache_index(force=True)
+
+                # Batch de 4 mails par appel : le workflow interroge Azure pour
                 # ne réanalyser que les mails absents du cache Blob Storage.
                 BATCH_SIZE = 4
                 processed = []
@@ -284,11 +316,18 @@ def main() -> None:
 
     promos = [e for e in processed if e.get("is_promo")]
 
-    top_cols = st.columns([3, 1])
-    with top_cols[0]:
-        st.caption(f"{len(promos)} promo(s) sur {len(processed)} mails")
-    with top_cols[1]:
-        st.page_link("pages/1_Chat_Promos.py", label="💬 Chat", use_container_width=True)
+    # KPIs rapides
+    kpi_cols = st.columns(4)
+    with kpi_cols[0]:
+        st.metric("Mails traités", len(processed))
+    with kpi_cols[1]:
+        st.metric("Promos", len(promos))
+    with kpi_cols[2]:
+        unique_brands = len({p.get("company") for p in promos if p.get("company")})
+        st.metric("Marques", unique_brands)
+    with kpi_cols[3]:
+        st.page_link("pages/1_Chat_Promos.py", label="💬 Ouvrir le chat IA",
+                     use_container_width=True)
 
     if not promos:
         st.info("Aucune promo détectée parmi les mails chargés.")
