@@ -64,14 +64,24 @@ def _render_login_form() -> None:
             st.error("Connexion échouée. Vérifiez votre email et votre mot de passe d'application.")
 
 
-def _ensure_connection() -> Optional[str]:
-    """Vérifie et rétablit la connexion IMAP si nécessaire."""
+def _ensure_connection(force_check: bool = False) -> Optional[str]:
+    """Retourne le session_id si l'utilisateur est logué.
+
+    Par défaut, ne pinge PAS IMAP : les reruns Streamlit (radio, selectbox...)
+    n'ont pas besoin d'une connexion IMAP vivante tant que les mails sont
+    déjà en cache. Passer force_check=True juste avant une opération IMAP
+    réelle (fetch/reload) pour valider et reconnecter si besoin.
+    """
     session_id = st.session_state.get("session_id")
+    email = st.session_state.get("gmail_email")
+    password = st.session_state.get("gmail_password")
+
+    if not force_check:
+        return session_id if (session_id and email and password) else None
+
     if session_id and gmail_client.is_connected(session_id):
         return session_id
 
-    email = st.session_state.get("gmail_email")
-    password = st.session_state.get("gmail_password")
     if email and password:
         logger.info("Reconnecting IMAP for %s", email)
         new_session = gmail_client.connect(email, password)
@@ -243,6 +253,13 @@ def main() -> None:
     if force_reload or cache_key not in st.session_state:
         with st.status("Chargement et analyse des mails promos...", expanded=True) as status:
             try:
+                status.update(label="Vérification de la connexion IMAP...")
+                session_id = _ensure_connection(force_check=True)
+                if not session_id:
+                    status.update(label="Connexion IMAP perdue.", state="error")
+                    st.error("La connexion Gmail a expiré. Merci de vous reconnecter.")
+                    st.session_state.pop("session_id", None)
+                    return
                 status.update(label=f"Lecture des {retention_days} derniers jours de Promotions...")
                 emails = gmail_client.get_promo_emails(session_id, days=retention_days)
                 if not emails:
