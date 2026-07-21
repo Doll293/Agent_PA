@@ -295,29 +295,29 @@ def main() -> None:
         return
 
     # Filtre par plage de dates (sur received_date au format YYYY-MM-DD)
-    # dated = [(p, p.get("received_date", "")) for p in promos]
-    # known_dates = sorted({d for _, d in dated if d})
-    # if known_dates:
-    #     min_date = datetime.strptime(known_dates[0], "%Y-%m-%d").date()
-    #     max_date = datetime.strptime(known_dates[-1], "%Y-%m-%d").date()
-    #     selected_range = st.date_input(
-    #         "Filtrer par plage de dates",
-    #         value=(min_date, max_date),
-    #         min_value=min_date,
-    #         max_value=max_date,
-    #         format="YYYY-MM-DD",
-    #     )
-    #     if isinstance(selected_range, tuple) and len(selected_range) == 2:
-    #         start, end = selected_range
-    #         promos = [
-    #             p for p, d in dated
-    #             if d and start.isoformat() <= d <= end.isoformat()
-    #         ]
-    #         st.caption(f"{len(promos)} promo(s) entre {start} et {end}")
+    dated = [(p, p.get("received_date", "")) for p in promos]
+    known_dates = sorted({d for _, d in dated if d})
+    if known_dates:
+        min_date = datetime.strptime(known_dates[0], "%Y-%m-%d").date()
+        max_date = datetime.strptime(known_dates[-1], "%Y-%m-%d").date()
+        selected_range = st.date_input(
+            "Filtrer par plage de dates",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            format="YYYY-MM-DD",
+        )
+        if isinstance(selected_range, tuple) and len(selected_range) == 2:
+            start, end = selected_range
+            promos = [
+                p for p, d in dated
+                if d and start.isoformat() <= d <= end.isoformat()
+            ]
+            st.caption(f"{len(promos)} promo(s) entre {start} et {end}")
 
-    # if not promos:
-    #     st.info("Aucune promo dans la plage de dates sélectionnée.")
-    #     return
+    if not promos:
+        st.info("Aucune promo dans la plage de dates sélectionnée.")
+        return
 
     tab1, tab2 = st.tabs(["Fiche Promos", "Par catégorie"])
 
