@@ -180,39 +180,30 @@ def _render_fiche(promos: list, period: str) -> None:
         st.info("Aucune promo sur cette période.")
         return
 
-    # Tableau récapitulatif
+    MAX_ROWS = 50
+    total = len(filtered)
+    shown = filtered[:MAX_ROWS]
+    if total > MAX_ROWS:
+        st.caption(f"Affichage des {MAX_ROWS} premières promos sur {total}.")
+
     rows = []
-    for e in filtered:
-        message_id = e.get("message_id", "")
-        gmail_url = f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{message_id}" if message_id else ""
+    for e in shown:
         rows.append({
             "Entreprise": e.get("company") or e.get("from", ""),
             "Promo": e.get("summary") or e.get("subject", ""),
             "Réduction": e.get("discount", ""),
-            "Code promo": e.get("promo_code", ""),
-            "Expire le": e.get("expiry_date", ""),
+            "Code": e.get("promo_code", ""),
+            "Expire": e.get("expiry_date", ""),
             "Catégorie": e.get("category", ""),
-            "Ouvrir": gmail_url,
-            "Se désabonner": e.get("unsubscribe_url", ""),
         })
-
-    st.dataframe(
-        rows,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Ouvrir": st.column_config.LinkColumn("Ouvrir", display_text="📧 Voir"),
-            "Se désabonner": st.column_config.LinkColumn("Se désabonner", display_text="🚫 Stop"),
-        }
-    )
+    st.table(rows)
 
     st.markdown("---")
     st.markdown("#### Détail des promos")
 
     MAX_CARDS = 20
-    total = len(filtered)
     if total > MAX_CARDS:
-        st.caption(f"Affichage des {MAX_CARDS} premières promos sur {total}. Utilisez le tableau ci-dessus pour tout voir.")
+        st.caption(f"Affichage détaillé des {MAX_CARDS} premières promos sur {total}.")
     for e in filtered[:MAX_CARDS]:
         _render_promo_card(e)
 
