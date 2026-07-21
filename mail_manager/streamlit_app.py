@@ -1,3 +1,4 @@
+import faulthandler
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -5,6 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 import streamlit as st
+
+faulthandler.enable()
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent
