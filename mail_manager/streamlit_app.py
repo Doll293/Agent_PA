@@ -208,7 +208,12 @@ def _render_fiche(promos: list, period: str) -> None:
 
     st.markdown("---")
     st.markdown("#### Détail des promos")
-    for e in filtered:
+
+    MAX_CARDS = 20
+    total = len(filtered)
+    if total > MAX_CARDS:
+        st.caption(f"Affichage des {MAX_CARDS} premières promos sur {total}. Utilisez le tableau ci-dessus pour tout voir.")
+    for e in filtered[:MAX_CARDS]:
         _render_promo_card(e)
 
 
@@ -353,8 +358,13 @@ def main() -> None:
         cats = sorted({e.get("category", "autre") for e in promos})
         selected = st.selectbox("Catégorie", cats)
         cat_promos = [e for e in promos if e.get("category") == selected]
-        st.caption(f"{len(cat_promos)} promo(s) dans '{selected}'")
-        for e in cat_promos:
+        MAX_CARDS = 20
+        total = len(cat_promos)
+        if total > MAX_CARDS:
+            st.caption(f"{total} promo(s) dans '{selected}' — affichage des {MAX_CARDS} premières.")
+        else:
+            st.caption(f"{total} promo(s) dans '{selected}'")
+        for e in cat_promos[:MAX_CARDS]:
             _render_promo_card(e)
 
 
