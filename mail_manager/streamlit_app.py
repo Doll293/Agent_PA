@@ -194,6 +194,7 @@ def _render_fiche(promos: list, period: str) -> None:
             "Se désabonner": e.get("unsubscribe_url", ""),
         })
 
+
     st.dataframe(
         rows,
         use_container_width=True,
