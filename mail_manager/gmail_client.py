@@ -1,6 +1,7 @@
 import imaplib
 import email
 import re
+import threading
 from datetime import datetime, timezone
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
@@ -57,6 +58,8 @@ class GmailClient:
 
     def __init__(self) -> None:
         self._sessions: dict = {}
+        self._locks: dict[str, threading.Lock] = {}
+        self._registry_lock = threading.Lock()
 
     def is_configured(self) -> bool:
         return True
@@ -64,12 +67,20 @@ class GmailClient:
     def get_configuration_error(self) -> Optional[str]:
         return None
 
+    def _get_lock(self, session_id: str) -> threading.Lock:
+        with self._registry_lock:
+            if session_id not in self._locks:
+                self._locks[session_id] = threading.Lock()
+            return self._locks[session_id]
+
     def connect(self, email_address: str, app_password: str) -> Optional[str]:
         try:
             mail = imaplib.IMAP4_SSL(self.IMAP_HOST, self.IMAP_PORT)
             mail.login(email_address, app_password)
             session_id = email_address
-            self._sessions[session_id] = mail
+            with self._registry_lock:
+                self._sessions[session_id] = mail
+                self._locks[session_id] = threading.Lock()
             logger.info("IMAP connection successful for %s", email_address)
             return session_id
         except imaplib.IMAP4.error as e:
@@ -79,19 +90,30 @@ class GmailClient:
     def is_connected(self, session_id: Optional[str]) -> bool:
         if not session_id or session_id not in self._sessions:
             return False
+        lock = self._get_lock(session_id)
+        # Non-bloquant : si un fetch est en cours, on considere la session vivante.
+        if not lock.acquire(blocking=False):
+            return True
         try:
             self._sessions[session_id].noop()
             return True
         except Exception:
             return False
+        finally:
+            lock.release()
 
     def clear_session(self, session_id: Optional[str]) -> None:
         if session_id and session_id in self._sessions:
-            try:
-                self._sessions[session_id].logout()
-            except Exception:
-                pass
-            del self._sessions[session_id]
+            lock = self._get_lock(session_id)
+            with lock:
+                try:
+                    self._sessions[session_id].logout()
+                except Exception:
+                    pass
+                with self._registry_lock:
+                    self._sessions.pop(session_id, None)
+            with self._registry_lock:
+                self._locks.pop(session_id, None)
 
     def get_promo_emails(self, session_id: Optional[str], days: int = 30) -> list:
         """Recupere les mails de l'onglet Promotions des `days` derniers jours."""
@@ -99,66 +121,93 @@ class GmailClient:
             return []
 
         mail = self._sessions[session_id]
-        try:
-            mail.select("INBOX")
-            query = f'"category:promotions newer_than:{days}d"'
-            typ, data = mail.search(None, 'X-GM-RAW', query)
-            if typ != "OK":
-                logger.warning("X-GM-RAW search failed, fallback to ALL")
-                _, data = mail.search(None, "ALL")
+        lock = self._get_lock(session_id)
+        with lock:
+            try:
+                mail.select("INBOX")
+                query = f'"category:promotions newer_than:{days}d"'
+                typ, data = mail.search(None, 'X-GM-RAW', query)
+                if typ != "OK":
+                    logger.warning("X-GM-RAW search failed, fallback to ALL")
+                    _, data = mail.search(None, "ALL")
 
-            ids = data[0].split()
-            logger.info("Found %s promotion emails on last %s days", len(ids), days)
-            return self._fetch_emails(mail, ids[::-1])
-        except Exception as e:
-            logger.error("Failed to fetch promo emails: %s", e)
-            return []
+                ids = data[0].split()
+                logger.info("Found %s promotion emails on last %s days", len(ids), days)
+                return self._fetch_emails(mail, ids[::-1])
+            except Exception as e:
+                logger.error("Failed to fetch promo emails: %s", e)
+                return []
 
     def get_recent_emails(self, session_id: Optional[str], max_results: int = 10) -> list:
         if not session_id or session_id not in self._sessions:
             return []
 
         mail = self._sessions[session_id]
-        try:
-            mail.select("INBOX")
-            _, data = mail.search(None, "ALL")
-            ids = data[0].split()
-            recent_ids = ids[-max_results:][::-1]
-            return self._fetch_emails(mail, recent_ids)
-        except Exception as e:
-            logger.error("Failed to fetch emails: %s", e)
-            return []
-
-    def _fetch_emails(self, mail, msg_ids: list) -> list:
-        emails = []
-        for msg_id in msg_ids:
+        lock = self._get_lock(session_id)
+        with lock:
             try:
-                _, msg_data = mail.fetch(msg_id, "(RFC822)")
-                raw = msg_data[0][1]
-                msg = email.message_from_bytes(raw)
-
-                subject = _decode_str(msg.get("Subject", "(sans sujet)"))
-                sender = _decode_str(msg.get("From", "Inconnu"))
-                date = msg.get("Date", "")
-                snippet = self._get_snippet(msg)
-                unsubscribe_url, unsubscribe_email = _extract_unsubscribe(
-                    msg.get("List-Unsubscribe", "")
-                )
-                message_id = msg.get("Message-ID", "").strip("<>")
-
-                emails.append({
-                    "id": msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id),
-                    "from": sender,
-                    "subject": subject,
-                    "date": date,
-                    "received_date": _parse_received_date(date),
-                    "snippet": snippet,
-                    "unsubscribe_url": unsubscribe_url,
-                    "unsubscribe_email": unsubscribe_email,
-                    "message_id": message_id,
-                })
+                mail.select("INBOX")
+                _, data = mail.search(None, "ALL")
+                ids = data[0].split()
+                recent_ids = ids[-max_results:][::-1]
+                return self._fetch_emails(mail, recent_ids)
             except Exception as e:
-                logger.error("Failed to parse message %s: %s", msg_id, e)
+                logger.error("Failed to fetch emails: %s", e)
+                return []
+
+    def _fetch_emails(self, mail, msg_ids: list, batch_size: int = 30) -> list:
+        """Fetch groupe : 1 requete IMAP par lot de `batch_size` mails.
+
+        Gmail ferme les connexions inactives ; grouper reduit le nombre
+        d'aller-retours et donc le risque de perte de socket.
+        """
+        emails: list = []
+        total = len(msg_ids)
+        for start in range(0, total, batch_size):
+            batch = msg_ids[start:start + batch_size]
+            id_set = ",".join(m.decode() if isinstance(m, bytes) else str(m) for m in batch)
+            try:
+                typ, data = mail.fetch(id_set, "(RFC822)")
+                if typ != "OK":
+                    logger.warning("Batch fetch not OK at offset %s: %s", start, typ)
+                    continue
+            except Exception as e:
+                logger.error("Batch fetch failed at offset %s: %s", start, e)
+                # Socket casse : inutile de continuer, on rend ce qu'on a
+                break
+
+            # Le format de reponse alterne : (header, body) puis b')' fermant
+            for item in data:
+                if not isinstance(item, tuple) or len(item) < 2:
+                    continue
+                raw = item[1]
+                if not raw:
+                    continue
+                try:
+                    msg = email.message_from_bytes(raw)
+                    subject = _decode_str(msg.get("Subject", "(sans sujet)"))
+                    sender = _decode_str(msg.get("From", "Inconnu"))
+                    date = msg.get("Date", "")
+                    snippet = self._get_snippet(msg)
+                    unsubscribe_url, unsubscribe_email = _extract_unsubscribe(
+                        msg.get("List-Unsubscribe", "")
+                    )
+                    message_id = msg.get("Message-ID", "").strip("<>")
+                    emails.append({
+                        "id": "",
+                        "from": sender,
+                        "subject": subject,
+                        "date": date,
+                        "received_date": _parse_received_date(date),
+                        "snippet": snippet,
+                        "unsubscribe_url": unsubscribe_url,
+                        "unsubscribe_email": unsubscribe_email,
+                        "message_id": message_id,
+                    })
+                except Exception as e:
+                    logger.error("Failed to parse message in batch (offset %s): %s", start, e)
+
+        logger.info("Fetched %s/%s emails in %s batches", len(emails), total, (total + batch_size - 1) // batch_size)
         return emails
 
     def _get_snippet(self, msg) -> str:
