@@ -1044,12 +1044,14 @@ def page_stats() -> None:
 # ============================================================
 
 if __name__ in {"__main__", "__mp_main__"}:
+    import os
     ui.run(
         title="Mail Manager",
-        port=8080,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8080")),
         storage_secret=settings.session_secret if settings.session_secret != "change-me" else secrets.token_urlsafe(32),
         favicon="📬",
-        dark=True,
+        dark=False,
         reload=False,
         show=False,
     )
