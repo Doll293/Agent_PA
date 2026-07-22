@@ -30,6 +30,43 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
+# LOG: diagnostics globaux connexion / déconnexion / exceptions
+# ============================================================
+
+def _on_client_connect(client) -> None:
+    try:
+        logger.info(
+            "CLIENT CONNECT — client_id=%s page=%s ip=%s",
+            client.id,
+            getattr(getattr(client, "page", None), "path", "?"),
+            getattr(client, "ip", "?"),
+        )
+    except Exception:
+        logger.exception("Erreur dans on_connect logging")
+
+
+def _on_client_disconnect(client) -> None:
+    try:
+        logger.warning(
+            "CLIENT DISCONNECT — client_id=%s page=%s (si cela suit immédiatement un filtre de date, "
+            "chercher une exception juste au-dessus dans les logs)",
+            client.id,
+            getattr(getattr(client, "page", None), "path", "?"),
+        )
+    except Exception:
+        logger.exception("Erreur dans on_disconnect logging")
+
+
+def _on_exception(exc: Exception) -> None:
+    # NiceGUI attrape les exceptions des handlers ici : c'est LE log à surveiller.
+    logger.exception("EXCEPTION NON GÉRÉE (app.on_exception): %s", exc)
+
+
+app.on_connect(_on_client_connect)
+app.on_disconnect(_on_client_disconnect)
+app.on_exception(_on_exception)
+
+# ============================================================
 # État partagé (module-level singletons)
 # ============================================================
 
@@ -367,6 +404,7 @@ def render_header(active: str) -> None:
 
 
 def logout() -> None:
+    logger.info("LOGOUT demandé — user=%s", app.storage.user.get("gmail_email", "?"))  # LOG
     session_id = app.storage.user.get("session_id")
     if session_id:
         _gmail_client.clear_session(session_id)
@@ -377,15 +415,27 @@ def logout() -> None:
 def _ensure_connection() -> str | None:
     session_id = app.storage.user.get("session_id")
     if session_id and _gmail_client.is_connected(session_id):
+        logger.debug("ensure_connection: session %s toujours valide", session_id[:8])  # LOG
         return session_id
+
+    # LOG: cas important — la session IMAP a été perdue (souvent après restart du worker Azure)
+    logger.warning(
+        "ensure_connection: session absente ou expirée (session_id=%s, connected=%s) — tentative de reconnexion",
+        (session_id[:8] + "…") if session_id else None,
+        _gmail_client.is_connected(session_id) if session_id else False,
+    )
 
     email = app.storage.user.get("gmail_email")
     password = app.storage.user.get("gmail_password")
     if email and password:
         new_session = _gmail_client.connect(email, password)
         if new_session:
+            logger.info("ensure_connection: reconnexion IMAP réussie pour %s", email)  # LOG
             app.storage.user["session_id"] = new_session
             return new_session
+        logger.error("ensure_connection: reconnexion IMAP ÉCHOUÉE pour %s", email)  # LOG
+    else:
+        logger.info("ensure_connection: pas de credentials en storage.user — retour au login")  # LOG
     return None
 
 
@@ -431,16 +481,19 @@ def _render_login() -> None:
                 error_label.text = ""
                 clean_pw = password_input.value.replace(" ", "")
                 connect_btn.props("loading")
+                logger.info("LOGIN: tentative pour %s", email_input.value)  # LOG
                 try:
                     session_id = await run.io_bound(_gmail_client.connect, email_input.value, clean_pw)
                 finally:
                     connect_btn.props(remove="loading")
                 if session_id:
+                    logger.info("LOGIN: succès pour %s (session %s…)", email_input.value, session_id[:8])  # LOG
                     app.storage.user["session_id"] = session_id
                     app.storage.user["gmail_email"] = email_input.value
                     app.storage.user["gmail_password"] = clean_pw
                     ui.navigate.to("/")
                 else:
+                    logger.warning("LOGIN: échec pour %s", email_input.value)  # LOG
                     error_label.text = "Connexion échouée. Vérifiez votre email et votre mot de passe d'application."
 
             connect_btn = ui.button("Se connecter", on_click=do_login).classes("mm-btn-primary w-full").style("margin-top:1rem;")
@@ -490,9 +543,11 @@ def _render_promos(session_id: str) -> None:
 async def _load_promos_flow(user_email: str, preferences: str, container: ui.column) -> None:
     session_id = app.storage.user.get("session_id")
     if not session_id:
+        logger.warning("load_promos: session expirée pour %s", user_email)  # LOG
         ui.notify("Session expirée, reconnectez-vous.", type="negative")
         return
 
+    logger.info("load_promos: début pour %s (prefs=%r)", user_email, preferences)  # LOG
     workflow = _get_workflow(user_email)
     workflow.preferences = preferences
 
@@ -512,10 +567,12 @@ async def _load_promos_flow(user_email: str, preferences: str, container: ui.col
         return
 
     if not emails:
+        logger.info("load_promos: 0 email trouvé pour %s", user_email)  # LOG
         status_label.text = "Aucun email trouvé dans l'onglet Promotions."
         return
 
     total = len(emails)
+    logger.info("load_promos: %s emails récupérés, traitement par batch", total)  # LOG
     status_label.text = f"{total} mails à traiter (déduplication via Azure)..."
 
     # Charger index Azure une seule fois
@@ -525,12 +582,17 @@ async def _load_promos_flow(user_email: str, preferences: str, container: ui.col
     BATCH_SIZE = 4
     for batch_start in range(0, total, BATCH_SIZE):
         batch = emails[batch_start:batch_start + BATCH_SIZE]
-        batch_result = await run.io_bound(workflow.run_for_batch, batch)
+        try:  # LOG: isole les erreurs par batch pour ne pas tout perdre
+            batch_result = await run.io_bound(workflow.run_for_batch, batch)
+        except Exception:
+            logger.exception("load_promos: échec du batch %s-%s", batch_start, batch_start + BATCH_SIZE)  # LOG
+            continue
         processed.extend(batch_result)
         done = min(batch_start + BATCH_SIZE, total)
         progress.value = done / total
         status_label.text = f"Traitement {done} / {total}..."
 
+    logger.info("load_promos: terminé — %s mails traités pour %s", len(processed), user_email)  # LOG
     status_label.text = f"{len(processed)} mails traités."
     _user_emails[user_email] = processed
     _render_cached_promos(container, user_email)
@@ -538,6 +600,7 @@ async def _load_promos_flow(user_email: str, preferences: str, container: ui.col
 
 def _render_cached_promos(container: ui.column, user_email: str) -> None:
     processed = _user_emails.get(user_email, [])
+    logger.debug("render_cached_promos: %s mails en cache pour %s", len(processed), user_email)  # LOG
     container.clear()
 
     if not processed:
@@ -571,11 +634,12 @@ def _render_cached_promos(container: ui.column, user_email: str) -> None:
                 end_input = ui.input(value=date_state["end"]).props("type=date outlined dense").classes("mm-input")
 
                 def reset_range() -> None:
+                    logger.info("date_filter: reset plage complète (%s → %s)", min_date, max_date)  # LOG
                     date_state["start"] = min_date
                     date_state["end"] = max_date
                     start_input.value = min_date
                     end_input.value = max_date
-                    rebuild()
+                    safe_rebuild("reset_range")
 
                 ui.button("Toute la plage", on_click=reset_range).classes("mm-btn-ghost")
 
@@ -588,6 +652,16 @@ def _render_cached_promos(container: ui.column, user_email: str) -> None:
         def rebuild() -> None:
             start = date_state["start"] or min_date
             end = date_state["end"] or max_date
+            logger.info(  # LOG: valeurs et types AVANT comparaison — c'est ici que ça peut casser
+                "date_filter: rebuild start=%r (%s) end=%r (%s)",
+                start, type(start).__name__, end, type(end).__name__,
+            )
+            if not isinstance(start, str):  # LOG: garde-fou — Quasar peut envoyer None/dict
+                logger.warning("date_filter: start non-str (%r), fallback min_date", start)
+                start = min_date
+            if not isinstance(end, str):
+                logger.warning("date_filter: end non-str (%r), fallback max_date", end)
+                end = max_date
             if start > end:
                 start, end = end, start
 
@@ -597,6 +671,7 @@ def _render_cached_promos(container: ui.column, user_email: str) -> None:
 
             filtered = [p for p in all_promos if in_range(p)]
             filtered_others = [e for e in other_mails if in_range(e)]
+            logger.info("date_filter: %s promos / %s autres dans [%s ; %s]", len(filtered), len(filtered_others), start, end)  # LOG
 
             # KPIs
             kpi_row.clear()
@@ -627,12 +702,31 @@ def _render_cached_promos(container: ui.column, user_email: str) -> None:
                                 _render_by_category(filtered)
                         with ui.tab_panel(tab_other):
                             _render_other_mails(filtered_others)
+            logger.debug("date_filter: rebuild terminé")  # LOG
 
-        # Wire changes
-        start_input.on("update:model-value", lambda e: (date_state.update(start=start_input.value), rebuild()))
-        end_input.on("update:model-value", lambda e: (date_state.update(end=end_input.value), rebuild()))
+        def safe_rebuild(origin: str) -> None:
+            """LOG: wrapper — toute exception ici est loggée au lieu de casser le websocket."""
+            try:
+                rebuild()
+            except Exception:
+                logger.exception("date_filter: EXCEPTION dans rebuild() (origine=%s, state=%r)", origin, date_state)
+                ui.notify("Erreur lors du filtrage par date (voir logs serveur).", type="negative")
 
-        rebuild()
+        # Wire changes — LOG: on logge la valeur brute de l'événement (e.args) ET la valeur du champ
+        def on_start_change(e) -> None:
+            logger.info("date_filter: start changé — e.args=%r input.value=%r", getattr(e, "args", None), start_input.value)
+            date_state["start"] = start_input.value
+            safe_rebuild("start_input")
+
+        def on_end_change(e) -> None:
+            logger.info("date_filter: end changé — e.args=%r input.value=%r", getattr(e, "args", None), end_input.value)
+            date_state["end"] = end_input.value
+            safe_rebuild("end_input")
+
+        start_input.on("update:model-value", on_start_change)
+        end_input.on("update:model-value", on_end_change)
+
+        safe_rebuild("initial")
 
 
 def _kpi(label: str, value: str, delta: str = "") -> None:
@@ -1052,4 +1146,5 @@ if __name__ in {"__main__", "__mp_main__"}:
         dark=True,
         reload=False,
         show=False,
+        reconnect_timeout=30,  # LOG/FIX: laisse 30s au client pour se rattacher au websocket avant de jeter l'état
     )
