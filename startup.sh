@@ -1,4 +1,4 @@
 #!/bin/bash
-python -m streamlit run mail_manager/streamlit_app.py \
-    --server.port=8000 \
-    --server.address=0.0.0.0
+# NiceGUI lit PORT depuis l'env (défini par Azure) et bind sur 0.0.0.0 côté script.
+export PORT="${PORT:-8000}"
+python mail_manager/nicegui_app.py
