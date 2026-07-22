@@ -12,7 +12,6 @@ PROJECT_ROOT = CURRENT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from mail_manager.azure_storage import list_cached_hashes
 from mail_manager.config import settings
 from mail_manager.gmail_client import GmailClient
 from mail_manager.workflow import Workflow
@@ -21,8 +20,6 @@ logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
-logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
-logging.getLogger("azure.storage").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 if "gmail_client" not in st.session_state:
@@ -67,24 +64,14 @@ def _render_login_form() -> None:
             st.error("Connexion échouée. Vérifiez votre email et votre mot de passe d'application.")
 
 
-def _ensure_connection(force_check: bool = False) -> Optional[str]:
-    """Retourne le session_id si l'utilisateur est logué.
-
-    Par défaut, ne pinge PAS IMAP : les reruns Streamlit (radio, selectbox...)
-    n'ont pas besoin d'une connexion IMAP vivante tant que les mails sont
-    déjà en cache. Passer force_check=True juste avant une opération IMAP
-    réelle (fetch/reload) pour valider et reconnecter si besoin.
-    """
+def _ensure_connection() -> Optional[str]:
+    """Vérifie et rétablit la connexion IMAP si nécessaire."""
     session_id = st.session_state.get("session_id")
-    email = st.session_state.get("gmail_email")
-    password = st.session_state.get("gmail_password")
-
-    if not force_check:
-        return session_id if (session_id and email and password) else None
-
     if session_id and gmail_client.is_connected(session_id):
         return session_id
 
+    email = st.session_state.get("gmail_email")
+    password = st.session_state.get("gmail_password")
     if email and password:
         logger.info("Reconnecting IMAP for %s", email)
         new_session = gmail_client.connect(email, password)
@@ -107,12 +94,12 @@ def _load_emails(session_id: str, mail_limit: int) -> list:
 
 
 def _parse_date(email: dict) -> datetime:
-    received = email.get("received_date", "")
-    if received:
+    raw = email.get("date", "")
+    for fmt in ["%a, %d %b %Y %H:%M:%S %z", "%d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z"]:
         try:
-            return datetime.strptime(received, "%Y-%m-%d")
-        except ValueError:
-            pass
+            return datetime.strptime(raw[:31].strip(), fmt)
+        except Exception:
+            continue
     return datetime.now()
 
 
@@ -180,31 +167,35 @@ def _render_fiche(promos: list, period: str) -> None:
         st.info("Aucune promo sur cette période.")
         return
 
-    MAX_ROWS = 50
-    total = len(filtered)
-    shown = filtered[:MAX_ROWS]
-    if total > MAX_ROWS:
-        st.caption(f"Affichage des {MAX_ROWS} premières promos sur {total}.")
-
+    # Tableau récapitulatif
     rows = []
-    for e in shown:
+    for e in filtered:
+        message_id = e.get("message_id", "")
+        gmail_url = f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{message_id}" if message_id else ""
         rows.append({
             "Entreprise": e.get("company") or e.get("from", ""),
             "Promo": e.get("summary") or e.get("subject", ""),
             "Réduction": e.get("discount", ""),
-            "Code": e.get("promo_code", ""),
-            "Expire": e.get("expiry_date", ""),
+            "Code promo": e.get("promo_code", ""),
+            "Expire le": e.get("expiry_date", ""),
             "Catégorie": e.get("category", ""),
+            "Ouvrir": gmail_url,
+            "Se désabonner": e.get("unsubscribe_url", ""),
         })
-    st.table(rows)
+
+    st.dataframe(
+        rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Ouvrir": st.column_config.LinkColumn("Ouvrir", display_text="📧 Voir"),
+            "Se désabonner": st.column_config.LinkColumn("Se désabonner", display_text="🚫 Stop"),
+        }
+    )
 
     st.markdown("---")
     st.markdown("#### Détail des promos")
-
-    MAX_CARDS = 20
-    if total > MAX_CARDS:
-        st.caption(f"Affichage détaillé des {MAX_CARDS} premières promos sur {total}.")
-    for e in filtered[:MAX_CARDS]:
+    for e in filtered:
         _render_promo_card(e)
 
 
@@ -252,13 +243,6 @@ def main() -> None:
     if force_reload or cache_key not in st.session_state:
         with st.status("Chargement et analyse des mails promos...", expanded=True) as status:
             try:
-                status.update(label="Vérification de la connexion IMAP...")
-                session_id = _ensure_connection(force_check=True)
-                if not session_id:
-                    status.update(label="Connexion IMAP perdue.", state="error")
-                    st.error("La connexion Gmail a expiré. Merci de vous reconnecter.")
-                    st.session_state.pop("session_id", None)
-                    return
                 status.update(label=f"Lecture des {retention_days} derniers jours de Promotions...")
                 emails = gmail_client.get_promo_emails(session_id, days=retention_days)
                 if not emails:
@@ -268,19 +252,15 @@ def main() -> None:
 
                 status.update(label=f"{len(emails)} mails à traiter (déduplication via Azure)...")
 
-                cached_index = (
-                    list_cached_hashes(workflow.user_email)
-                    if settings.azure_storage_enabled
-                    else {}
-                )
-
+                # Batch de 8 mails par appel : le workflow interroge Azure pour
+                # ne réanalyser que les mails absents du cache Blob Storage.
                 BATCH_SIZE = 4
                 processed = []
                 progress = st.progress(0, text="Traitement en cours...")
                 total = len(emails)
                 for batch_start in range(0, total, BATCH_SIZE):
                     batch = emails[batch_start:batch_start + BATCH_SIZE]
-                    processed.extend(workflow.run_for_batch(batch, cached_index=cached_index))
+                    processed.extend(workflow.run_for_batch(batch))
                     done = min(batch_start + BATCH_SIZE, total)
                     progress.progress(done / total if total else 1.0,
                                       text=f"Traitement {done} / {total}")
@@ -349,13 +329,8 @@ def main() -> None:
         cats = sorted({e.get("category", "autre") for e in promos})
         selected = st.selectbox("Catégorie", cats)
         cat_promos = [e for e in promos if e.get("category") == selected]
-        MAX_CARDS = 20
-        total = len(cat_promos)
-        if total > MAX_CARDS:
-            st.caption(f"{total} promo(s) dans '{selected}' — affichage des {MAX_CARDS} premières.")
-        else:
-            st.caption(f"{total} promo(s) dans '{selected}'")
-        for e in cat_promos[:MAX_CARDS]:
+        st.caption(f"{len(cat_promos)} promo(s) dans '{selected}'")
+        for e in cat_promos:
             _render_promo_card(e)
 
 

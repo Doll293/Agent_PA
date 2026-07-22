@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 
 from mail_manager.azure_storage import (
@@ -13,16 +11,6 @@ from mail_manager.privacy import anonymize_mail
 from mail_manager.processors import analyze_mails_batch
 
 logger = logging.getLogger(__name__)
-
-_DISPLAY_FIELDS = frozenset({
-    "message_id", "from", "date", "received_date", "subject", "unsubscribe_url",
-    "is_promo", "company", "category", "summary", "promo_code", "expiry_date",
-    "discount", "is_fake_promo",
-})
-
-
-def _trim_for_session(mail: dict) -> dict:
-    return {k: v for k, v in mail.items() if k in _DISPLAY_FIELDS}
 
 
 class Workflow:
@@ -46,11 +34,10 @@ class Workflow:
             "is_fake_promo": analysis.get("is_fake_promo", False),
         }
 
-    def run_for_batch(self, emails: list, cached_index: dict | None = None) -> list:
-        if cached_index is None:
-            cached_index = (
-                list_cached_hashes(self.user_email) if settings.azure_storage_enabled else {}
-            )
+    def run_for_batch(self, emails: list) -> list:
+        cached_index = (
+            list_cached_hashes(self.user_email) if settings.azure_storage_enabled else {}
+        )
 
         result: list = [None] * len(emails)
         to_analyze_positions = []
@@ -108,4 +95,4 @@ class Workflow:
             except Exception:
                 logger.exception("Stockage Azure echoue.")
 
-        return [_trim_for_session(m) if m else m for m in result]
+        return result
