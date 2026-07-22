@@ -549,47 +549,36 @@ def _render_cached_promos(container: ui.column, user_email: str) -> None:
     all_promos = [e for e in processed if e.get("is_promo")]
     other_mails = [e for e in processed if not e.get("is_promo")]
 
-    # Determine la plage de dates disponible
-    known_dates = sorted({p.get("received_date", "") for p in all_promos if p.get("received_date")})
-    if known_dates:
-        min_date = known_dates[0]
-        max_date = known_dates[-1]
-    else:
-        today = datetime.now().strftime("%Y-%m-%d")
-        min_date = max_date = today
+    period_state = {"value": "month"}
 
-    date_state = {"start": min_date, "end": max_date}
+    def _period_bounds(period: str) -> tuple[str, str]:
+        today = datetime.now().date()
+        if period == "today":
+            start_d = today
+        elif period == "week":
+            start_d = today - timedelta(days=today.weekday())
+        else:  # month
+            start_d = today.replace(day=1)
+        return start_d.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
     with container:
-        # Barre de haut : titre + filtre de date a droite
+        # Barre de haut : titre + filtre de periode a droite
         with ui.row().classes("w-full items-center justify-between").style("margin-top:1.5rem;flex-wrap:wrap;gap:1rem;"):
             _html(f'<div style="color:{TEXT_MUTED};font-size:0.9rem;">{len(processed)} mails analyses · {len(all_promos)} promos</div>')
             with ui.row().classes("items-center gap-2"):
-                _html(f'<span style="color:{TEXT_MUTED};font-size:0.9rem;">Du</span>')
-                start_input = ui.input(value=date_state["start"]).props("type=date outlined dense").classes("mm-input")
-                _html(f'<span style="color:{TEXT_MUTED};font-size:0.9rem;">au</span>')
-                end_input = ui.input(value=date_state["end"]).props("type=date outlined dense").classes("mm-input")
-
-                def reset_range() -> None:
-                    date_state["start"] = min_date
-                    date_state["end"] = max_date
-                    start_input.value = min_date
-                    end_input.value = max_date
-                    rebuild()
-
-                ui.button("Toute la plage", on_click=reset_range).classes("mm-btn-ghost")
+                period_radio = ui.radio(
+                    {"today": "Aujourd'hui", "week": "Cette semaine", "month": "Ce mois"},
+                    value=period_state["value"],
+                ).props("inline dense")
 
         # KPIs (recalculés selon le filtre)
         kpi_row = ui.row().classes("w-full gap-3").style("margin-top:1rem;")
 
-        # Tabs container (re-rendu au changement de date)
+        # Tabs container (re-rendu au changement de periode)
         tabs_container = ui.column().classes("w-full")
 
         def rebuild() -> None:
-            start = date_state["start"] or min_date
-            end = date_state["end"] or max_date
-            if start > end:
-                start, end = end, start
+            start, end = _period_bounds(period_state["value"])
 
             def in_range(e: dict) -> bool:
                 d = e.get("received_date", "")
@@ -617,20 +606,19 @@ def _render_cached_promos(container: ui.column, user_email: str) -> None:
                     with ui.tab_panels(tabs, value=tab_fiche).classes("w-full").style("background:transparent;"):
                         with ui.tab_panel(tab_fiche):
                             if not filtered:
-                                _html(f'<p style="color:{TEXT_MUTED};">Aucune promo dans cette plage.</p>')
+                                _html(f'<p style="color:{TEXT_MUTED};">Aucune promo dans cette période.</p>')
                             for e in filtered:
                                 _render_promo_card(e)
                         with ui.tab_panel(tab_cat):
                             if not filtered:
-                                _html(f'<p style="color:{TEXT_MUTED};">Aucune promo dans cette plage.</p>')
+                                _html(f'<p style="color:{TEXT_MUTED};">Aucune promo dans cette période.</p>')
                             else:
                                 _render_by_category(filtered)
                         with ui.tab_panel(tab_other):
                             _render_other_mails(filtered_others)
 
         # Wire changes
-        start_input.on("update:model-value", lambda e: (date_state.update(start=start_input.value), rebuild()))
-        end_input.on("update:model-value", lambda e: (date_state.update(end=end_input.value), rebuild()))
+        period_radio.on_value_change(lambda e: (period_state.update(value=e.value), rebuild()))
 
         rebuild()
 
@@ -646,7 +634,7 @@ def _kpi(label: str, value: str, delta: str = "") -> None:
 def _render_other_mails(mails: list) -> None:
     """Affichage compact des mails non-promo (newsletters, notifications, confirmations...)."""
     if not mails:
-        _html(f'<p style="color:{TEXT_MUTED};margin-top:1rem;">Aucun autre mail dans cette plage de dates.</p>')
+        _html(f'<p style="color:{TEXT_MUTED};margin-top:1rem;">Aucun autre mail dans cette période.</p>')
         return
 
     _html(
